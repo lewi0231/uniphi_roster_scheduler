@@ -1,9 +1,17 @@
 # test_rostering_api.py
-import pytest
+# import pytest
 from fastapi.testclient import TestClient
-from rostering_api import api, DayOfWeek, Employee, CarYard, ScheduleRequest, CarYardPriority
-from rostering_api import solve_roster
-from utils import print_json
+from src.scheduler.rostering_api import (
+    api,
+    DayOfWeek,
+    Employee,
+    CarYard,
+    ScheduleRequest,
+    CarYardPriority,
+    EmployeeReliabilityRating,
+    solve_roster,
+)
+from src.scheduler.utils import print_json
 
 client = TestClient(api)
 
@@ -23,80 +31,6 @@ def check_and_print_response(response, title="API Response"):
             print(f"Response Text: {response.text}")
         print('='*60 + "\n")
     return response
-
-
-# Fixtures for reusable test data
-@pytest.fixture
-def sample_employees():
-    return [
-        Employee(
-            id=1,
-            name="Chris",
-            ranking=1,
-            available_days=[DayOfWeek.MONDAY,
-                            DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY]
-        ),
-        Employee(
-            id=2,
-            name="Vashaal",
-            ranking=1,
-            available_days=[DayOfWeek.MONDAY,
-                            DayOfWeek.TUESDAY, DayOfWeek.THURSDAY]
-        ),
-        Employee(
-            id=3,
-            name="Paul",
-            ranking=1,
-            available_days=[DayOfWeek.WEDNESDAY,
-                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
-        ),
-        Employee(
-            id=3,
-            name="Nitish",
-            ranking=1,
-            available_days=[DayOfWeek.WEDNESDAY,
-                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
-        ),
-        Employee(
-            id=3,
-            name="Sam",
-            ranking=2,
-            available_days=[DayOfWeek.WEDNESDAY,
-                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
-        ),
-        Employee(
-            id=3,
-            name="Sanskar",
-            ranking=2,
-            available_days=[DayOfWeek.WEDNESDAY,
-                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
-        ),
-    ]
-
-
-@pytest.fixture
-def sample_car_yards():
-    return [
-        CarYard(id=1, name="AB", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=4),
-        CarYard(id=2, name="Hillcrest Used", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=3),
-        CarYard(id=3, name="Hillcrest New", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2),
-        CarYard(id=4, name="Eblen Suburu", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2),
-        CarYard(id=5, name="Reynella Kia", priority=CarYardPriority.MEDIUM,
-                min_employees=2, max_employees=4),
-        CarYard(id=6, name="Reynella Isuzu", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2),
-        CarYard(id=7, name="Reynella Geely", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2),
-    ]
-
-
-@pytest.fixture
-def sample_days():
-    return [DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
 
 
 # Test cases
@@ -153,7 +87,7 @@ def test_employee_availability_constraint(sample_employees, sample_car_yards):
     limited_employee = Employee(
         id=99,
         name="Limited",
-        ranking=1,
+        ranking=EmployeeReliabilityRating.EXCELLENT,
         available_days=[DayOfWeek.MONDAY]
     )
 
@@ -192,7 +126,7 @@ def test_impossible_constraint():
             Employee(
                 id=1,
                 name="Alice",
-                ranking=1,
+                ranking=EmployeeReliabilityRating.EXCELLENT,
                 available_days=[DayOfWeek.MONDAY]  # Only Monday
             )
         ],
@@ -214,19 +148,19 @@ def test_impossible_constraint():
 
 
 def test_ranking_preference():
-    """Test that higher-ranked employees (lower ranking number) get more shifts"""
+    """Test that higher reliability-rated employees get more shifts"""
     employees = [
         Employee(
             id=1,
-            name="Top Rank",
-            ranking=1,  # Best
+            name="Excellent Employee",
+            ranking=EmployeeReliabilityRating.EXCELLENT,  # Best (10)
             available_days=[DayOfWeek.MONDAY,
                             DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY]
         ),
         Employee(
             id=2,
-            name="Lower Rank",
-            ranking=5,  # Worse
+            name="Below Average Employee",
+            ranking=EmployeeReliabilityRating.BELOW_AVERAGE,  # Worse (5)
             available_days=[DayOfWeek.MONDAY,
                             DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY]
         ),
@@ -245,7 +179,7 @@ def test_ranking_preference():
     data = response.json()
     shifts_count = data["stats"]["shifts_per_employee"]
 
-    # Employee 1 (ranking 1) should get more or equal shifts than employee 2 (ranking 5)
+    # Employee 1 (EXCELLENT rating=10) should get more or equal shifts than employee 2 (BELOW_AVERAGE rating=5)
     assert shifts_count["1"] >= shifts_count["2"]
 
 
@@ -256,7 +190,7 @@ def test_one_employee_one_yard():
             Employee(
                 id=1,
                 name="Solo",
-                ranking=1,
+                ranking=EmployeeReliabilityRating.EXCELLENT,
                 available_days=[DayOfWeek.MONDAY]
             )
         ],
@@ -283,7 +217,8 @@ def test_workload_balance():
         Employee(
             id=i,
             name=f"Employee {i}",
-            ranking=1,  # Same ranking so quality doesn't override balance
+            # Same ranking so quality doesn't override balance
+            ranking=EmployeeReliabilityRating.EXCELLENT,
             available_days=[DayOfWeek.MONDAY,
                             DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY]
         )
@@ -316,19 +251,25 @@ def test_workload_balance():
     assert max_shifts - min_shifts <= 2  # Allow some flexibility
 
 
+def test_realistic_roster():
+    """Testing close to genuine roster"""
+
+    pass
+
+
 def test_priority_based_assignment():
     """Test that high-priority car yards are prioritized when employees are limited"""
     employees = [
         Employee(
             id=1,
             name="Employee 1",
-            ranking=1,
+            ranking=EmployeeReliabilityRating.EXCELLENT,
             available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
         ),
         Employee(
             id=2,
             name="Employee 2",
-            ranking=1,
+            ranking=EmployeeReliabilityRating.EXCELLENT,
             available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
         ),
     ]

@@ -19,6 +19,12 @@ class DayOfWeek(str, Enum):
     SUNDAY = "sunday"
 
 
+class EmployeeReliabilityRating(int, Enum):
+    EXCELLENT = 10
+    ACCEPTABLE = 7
+    BELOW_AVERAGE = 5
+
+
 class CarYardPriority(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
@@ -28,7 +34,7 @@ class CarYardPriority(str, Enum):
 class Employee(BaseModel):
     id: int
     name: str
-    ranking: int = Field(..., ge=1, description="1=best, higher=worse")
+    ranking: EmployeeReliabilityRating
     available_days: List[DayOfWeek]
 
 
@@ -119,12 +125,14 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                 if day not in emp.available_days:
                     model.Add(x[(emp_id, cy_id, day)] == 0)
 
-    # Objective 1: Prefer higher-ranked employees (lower ranking number = better)
+    # Objective 1: Prefer higher reliability-rated employees (higher rating = better)
+    # EmployeeReliabilityRating: EXCELLENT=10, ACCEPTABLE=7, BELOW_AVERAGE=5
     quality_score = []
     for emp_id, emp in employees.items():
         for cy_id in car_yards.keys():
             for day in days:
-                weight = len(employees) - emp.ranking + 1
+                # Use the reliability rating value directly (higher is better)
+                weight = emp.ranking.value
                 quality_score.append(x[(emp_id, cy_id, day)] * weight)
 
     # NEW Objective 2: Prioritize high-priority car yards
