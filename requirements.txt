@@ -1,0 +1,8 @@
+fastapi==0.120.4
+uvicorn[standard]==0.38.0
+pydantic==2.12.3
+ortools==9.14.6206
+python-multipart==0.0.20
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.1
