@@ -56,21 +56,21 @@ def sample_employees():
 def sample_car_yards():
     return [
         CarYard(id=1, name="Adrien Brian", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=4),
+                min_employees=2, max_employees=4, hours_required=10.0),
         CarYard(id=2, name="Hillcrest Used", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=3),
+                min_employees=2, max_employees=3, hours_required=5.0),
         CarYard(id=3, name="Hillcrest New", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2),
+                min_employees=1, max_employees=2, hours_required=2.5),
         CarYard(id=4, name="Eblen Suburu", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2),
+                min_employees=1, max_employees=2, hours_required=3.0),
         CarYard(id=5, name="Reynella Kia", priority=CarYardPriority.MEDIUM,
-                min_employees=2, max_employees=4),
+                min_employees=2, max_employees=4, hours_required=6.0),
         CarYard(id=6, name="Reynella Isuzu", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2),
+                min_employees=1, max_employees=2, hours_required=1.5),
         CarYard(id=7, name="Reynella Geely", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2),
+                min_employees=1, max_employees=2, hours_required=3.0),
         CarYard(id=8, name="Stillwell Ford", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2),
+                min_employees=1, max_employees=2, hours_required=2.0),
     ]
 
 

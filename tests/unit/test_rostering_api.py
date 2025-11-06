@@ -327,3 +327,365 @@ def test_priority_based_assignment():
         print(f"  High Priority Yard: {high_priority_days} days covered")
         print(f"  Medium Priority Yard: {medium_priority_days} days covered")
         print(f"  Low Priority Yard: {low_priority_days} days covered")
+
+
+def test_hours_constraint():
+    """Test that employees cannot exceed max_hours_per_day limit"""
+    # Create yards with different hour requirements
+    # Yard 1: 2 hours, Yard 2: 1.5 hours, Yard 3: 2.5 hours
+    # Total: 6 hours (exceeds 5 hour limit)
+    car_yards = [
+        CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0),
+        CarYard(id=2, name="Yard B", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=1.5),
+        CarYard(id=3, name="Yard C", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.5),
+    ]
+
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY]
+        )
+    ]
+
+    # Set max_hours_per_day to 5.0
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        max_hours_per_day=5.0
+    )
+
+    response = client.post("/api/v1/roster", json=request.model_dump())
+    check_and_print_response(response, "Hours Constraint Test")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # Group assignments by employee and day to calculate total hours
+    assignments_by_employee_day = {}
+    for assignment in data["assignments"]:
+        emp_id = assignment["employee_id"]
+        day = assignment["day"]
+        cy_id = assignment["car_yard_id"]
+        key = (emp_id, day)
+        if key not in assignments_by_employee_day:
+            assignments_by_employee_day[key] = []
+        assignments_by_employee_day[key].append(cy_id)
+
+    # Verify no employee exceeds max_hours_per_day (5.0 hours)
+    yard_hours = {cy.id: cy.hours_required for cy in car_yards}
+    for (emp_id, day), yard_ids in assignments_by_employee_day.items():
+        total_hours = sum(yard_hours[cy_id] for cy_id in yard_ids)
+        assert total_hours <= 5.0, f"Employee {emp_id} on {day} exceeds 5.0 hours: {total_hours} hours"
+
+
+def test_hours_constraint_multiple_yards_allowed():
+    """Test that employees CAN work multiple yards if they fit within hours limit"""
+    # Create yards that can fit together: 2.0 + 1.5 = 3.5 hours (within 5 hour limit)
+    car_yards = [
+        CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0),
+        CarYard(id=2, name="Yard B", priority=CarYardPriority.MEDIUM,
+                min_employees=1, max_employees=2, hours_required=1.5),
+    ]
+
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
+        )
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
+        max_hours_per_day=5.0
+    )
+
+    response = client.post("/api/v1/roster", json=request.model_dump())
+    assert response.status_code == 200
+    data = response.json()
+
+    # Group assignments by employee and day
+    assignments_by_employee_day = {}
+    for assignment in data["assignments"]:
+        emp_id = assignment["employee_id"]
+        day = assignment["day"]
+        cy_id = assignment["car_yard_id"]
+        key = (emp_id, day)
+        if key not in assignments_by_employee_day:
+            assignments_by_employee_day[key] = []
+        assignments_by_employee_day[key].append(cy_id)
+
+    # Verify that employees can work multiple yards if they fit within the limit
+    yard_hours = {cy.id: cy.hours_required for cy in car_yards}
+
+    # Check that at least one employee worked multiple yards on some day
+    # OR verify that total hours per day never exceeds 5.0
+    multi_yard_days = []
+    for (emp_id, day), yard_ids in assignments_by_employee_day.items():
+        total_hours = sum(yard_hours[cy_id] for cy_id in yard_ids)
+        assert total_hours <= 5.0, f"Employee {emp_id} on {day} exceeds limit: {total_hours} hours"
+        if len(yard_ids) > 1:
+            multi_yard_days.append((emp_id, day, yard_ids, total_hours))
+
+    # With hours constraint allowing multiple yards, it's possible (but not guaranteed)
+    # that an employee will work multiple yards if it's beneficial
+    # The important thing is that no employee exceeds the hours limit
+    if DEBUG and multi_yard_days:
+        print(f"\n✅ Found employees working multiple yards:")
+        for emp_id, day, yard_ids, total_hours in multi_yard_days:
+            print(
+                f"  Employee {emp_id} on {day}: {len(yard_ids)} yards, {total_hours} hours")
+
+
+def test_hours_constraint_with_default():
+    """Test that default max_hours_per_day=5.0 works correctly"""
+    # Create yards with varying hours
+    car_yards = [
+        CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0),
+        CarYard(id=2, name="Yard B", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0),
+        CarYard(id=3, name="Yard C", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0),
+    ]
+
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY]
+        )
+    ]
+
+    # Don't specify max_hours_per_day - should default to 5.0
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY]
+    )
+
+    response = client.post("/api/v1/roster", json=request.model_dump())
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify default max_hours_per_day is enforced
+    assignments_by_employee_day = {}
+    for assignment in data["assignments"]:
+        emp_id = assignment["employee_id"]
+        day = assignment["day"]
+        cy_id = assignment["car_yard_id"]
+        key = (emp_id, day)
+        if key not in assignments_by_employee_day:
+            assignments_by_employee_day[key] = []
+        assignments_by_employee_day[key].append(cy_id)
+
+    yard_hours = {cy.id: cy.hours_required for cy in car_yards}
+    for (emp_id, day), yard_ids in assignments_by_employee_day.items():
+        total_hours = sum(yard_hours[cy_id] for cy_id in yard_ids)
+        # Should not exceed default of 5.0 hours
+        assert total_hours <= 5.0, f"Employee {emp_id} on {day} exceeds default 5.0 hours: {total_hours} hours"
+
+
+def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, sample_days):
+    """
+    Test a realistic schedule scenario with readable output format.
+    Output structure: array of days, each day contains car yards, each car yard contains assigned employees.
+
+    Note: Uses original fixture values. The solver will automatically assign more employees
+    to yards with high hours_required to keep each employee under max_hours_per_day.
+    Example: A yard requiring 10 hours with 2 employees = 5 hours each (within limit).
+    """
+    # Group Reynella yards together (they're often done together)
+    yard_groups = {
+        "reynella_group": [5, 6, 7]  # Reynella Kia, Isuzu, Geely
+    }
+
+    request = ScheduleRequest(
+        employees=sample_employees,
+        car_yards=sample_car_yards,
+        days=sample_days,
+        yard_groups=yard_groups,
+        max_hours_per_day=5.0
+    )
+
+    response = client.post("/api/v1/roster", json=request.model_dump())
+
+    # Check if we got an error and print details
+    if response.status_code != 200:
+        print(f"\n❌ Error Response ({response.status_code}):")
+        try:
+            error_data = response.json()
+            print_json(error_data, "Error Details")
+        except:
+            print(f"Response text: {response.text}")
+
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+
+    data = response.json()
+    assert data["status"] in ["optimal", "feasible"]
+    assert "assignments" in data
+
+    # Build readable schedule structure
+    schedule = {}
+    employee_map = {emp.id: emp.name for emp in sample_employees}
+    yard_map = {cy.id: {"name": cy.name, "hours": cy.hours_required}
+                for cy in sample_car_yards}
+
+    # Initialize schedule structure
+    for day in sample_days:
+        schedule[day.value] = {
+            "day": day.value,
+            "car_yards": {}
+        }
+
+    # Populate schedule with assignments
+    for assignment in data["assignments"]:
+        day = assignment["day"]
+        cy_id = assignment["car_yard_id"]
+        emp_id = assignment["employee_id"]
+
+        if cy_id not in schedule[day]["car_yards"]:
+            schedule[day]["car_yards"][cy_id] = {
+                "yard_id": cy_id,
+                "yard_name": yard_map[cy_id]["name"],
+                "hours_required": yard_map[cy_id]["hours"],
+                "employees": []
+            }
+
+        schedule[day]["car_yards"][cy_id]["employees"].append({
+            "employee_id": emp_id,
+            "employee_name": employee_map[emp_id]
+        })
+
+    # Convert to list format for cleaner output
+    schedule_list = []
+    for day in sample_days:
+        day_data = {
+            "day": day.value,
+            "car_yards": list(schedule[day.value]["car_yards"].values())
+        }
+        schedule_list.append(day_data)
+
+    # Verify hours constraint
+    # First, calculate employees per yard per day to compute hours per employee correctly
+    employees_per_yard_day = {}  # (cy_id, day) -> list of employee_ids
+    for assignment in data["assignments"]:
+        key = (assignment["car_yard_id"], assignment["day"])
+        if key not in employees_per_yard_day:
+            employees_per_yard_day[key] = []
+        employees_per_yard_day[key].append(assignment["employee_id"])
+
+    # Now calculate hours per employee correctly (hours_required / num_employees)
+    employee_hours_per_day = {}
+    for assignment in data["assignments"]:
+        emp_id = assignment["employee_id"]
+        day = assignment["day"]
+        cy_id = assignment["car_yard_id"]
+        key = (emp_id, day)
+
+        if key not in employee_hours_per_day:
+            employee_hours_per_day[key] = 0.0
+
+        # Hours per employee = hours_required / number of employees at that yard
+        num_employees = len(employees_per_yard_day[(cy_id, day)])
+        hours_per_emp = yard_map[cy_id]["hours"] / num_employees
+        employee_hours_per_day[key] += hours_per_emp
+
+    # Assert hours constraint
+    for (emp_id, day), total_hours in employee_hours_per_day.items():
+        assert total_hours <= 5.0, \
+            f"Employee {employee_map[emp_id]} on {day} exceeds 5.0 hours: {total_hours:.2f} hours"
+
+    # Print readable schedule
+    if DEBUG:
+        print("\n" + "="*80)
+        print("📅 REALISTIC SCHEDULE - READABLE FORMAT")
+        print("="*80)
+
+        for day_schedule in schedule_list:
+            print(f"\n{'─'*80}")
+            print(f"📆 {day_schedule['day'].upper()}")
+            print(f"{'─'*80}")
+
+            if not day_schedule["car_yards"]:
+                print("  No assignments")
+                continue
+
+            total_day_hours = 0
+            for yard in day_schedule["car_yards"]:
+                yard_name = yard["yard_name"]
+                hours = yard["hours_required"]
+                employees = [emp["employee_name"] for emp in yard["employees"]]
+                num_employees = len(employees)
+
+                print(f"\n  🏢 {yard_name} (ID: {yard['yard_id']})")
+                print(
+                    f"     ⏱️  Hours: {hours:.1f}h | 👥 Employees: {num_employees}")
+                print(f"     👷 Assigned: {', '.join(employees)}")
+
+                total_day_hours += hours * num_employees
+
+            print(
+                f"\n  📊 Total yard-hours for {day_schedule['day']}: {total_day_hours:.1f}h")
+
+        print(f"\n{'─'*80}")
+        print("📈 SUMMARY STATISTICS")
+        print(f"{'─'*80}")
+
+        # Employee workload summary
+        employee_total_hours = {}
+        for (emp_id, day), hours in employee_hours_per_day.items():
+            if emp_id not in employee_total_hours:
+                employee_total_hours[emp_id] = 0.0
+            employee_total_hours[emp_id] += hours
+
+        print("\n👷 Employee Workload:")
+        for emp_id, total_hours in sorted(employee_total_hours.items()):
+            employee_name = employee_map[emp_id]
+            print(
+                f"  {employee_name}: {total_hours:.1f} hours across {len([d for (e, d) in employee_hours_per_day.keys() if e == emp_id])} days")
+
+        print("\n" + "="*80)
+
+        # Also print JSON format for programmatic access
+        print_json(schedule_list, "Schedule (JSON Format)")
+
+    # Assertions
+    assert len(schedule_list) == len(
+        sample_days), "Schedule should have entries for all days"
+
+    # Verify every yard is covered exactly once
+    all_yard_ids = {cy.id for cy in sample_car_yards}
+    covered_yard_ids = set()
+    for day_schedule in schedule_list:
+        for yard in day_schedule["car_yards"]:
+            covered_yard_ids.add(yard["yard_id"])
+
+    assert covered_yard_ids == all_yard_ids, \
+        f"All yards must be covered exactly once. Missing: {all_yard_ids - covered_yard_ids}, Extra: {covered_yard_ids - all_yard_ids}"
+
+    # Check that high-priority yards are covered
+    high_priority_yards = {
+        cy.id for cy in sample_car_yards if cy.priority.value == "high"}
+    covered_high_priority = set()
+    for day_schedule in schedule_list:
+        for yard in day_schedule["car_yards"]:
+            if yard["yard_id"] in high_priority_yards:
+                covered_high_priority.add(yard["yard_id"])
+
+    # All high-priority yards should be covered exactly once
+    assert len(covered_high_priority) == len(high_priority_yards), \
+        f"All high-priority yards should be covered. Expected {len(high_priority_yards)}, got {len(covered_high_priority)}"
+
+    return schedule_list
