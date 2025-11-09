@@ -1,6 +1,7 @@
 
 # Fixtures for reusable test data
-from src.scheduler.rostering_api import CarYard, CarYardPriority, DayOfWeek, Employee, EmployeeReliabilityRating
+from datetime import date
+from src.scheduler.rostering_api import CarYard, CarYardPriority, CarYardRegion, DayOfWeek, Employee, EmployeeReliabilityRating
 import pytest
 
 
@@ -26,7 +27,8 @@ def sample_employees():
             name="Paul",
             ranking=EmployeeReliabilityRating.EXCELLENT,
             available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
-                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY, DayOfWeek.SATURDAY]
+                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY, DayOfWeek.SATURDAY],
+            not_region=CarYardRegion.SOUTH
         ),
         Employee(
             id=4,
@@ -56,24 +58,29 @@ def sample_employees():
 def sample_car_yards():
     return [
         CarYard(id=1, name="Adrien Brian", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=4, hours_required=10.0),
-        CarYard(id=2, name="Hillcrest Used", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=3, hours_required=5.0),
-        CarYard(id=3, name="Hillcrest New", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2, hours_required=2.5),
+                min_employees=2, max_employees=4, hours_required=8.0, region=CarYardRegion.CENTRAL, per_week=(2, 2)),
+        CarYard(id=2, name="Hillcrest Used/New", priority=CarYardPriority.HIGH,
+                min_employees=2, max_employees=3, hours_required=7.5,  required_days=[DayOfWeek.THURSDAY], region=CarYardRegion.NORTH),
         CarYard(id=4, name="Eblen Suburu", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2, hours_required=3.0),
+                min_employees=1, max_employees=2, hours_required=3.0, region=CarYardRegion.CENTRAL, per_week=(2, 2)),
         CarYard(id=5, name="Reynella Kia", priority=CarYardPriority.MEDIUM,
-                min_employees=2, max_employees=4, hours_required=6.0),
-        CarYard(id=6, name="Reynella Isuzu", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2, hours_required=1.5),
-        CarYard(id=7, name="Reynella Geely", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2, hours_required=3.0),
+                min_employees=2, max_employees=4, hours_required=6.0, region=CarYardRegion.SOUTH, linked_yard=(6, 1)),
+        CarYard(id=6, name="Reynella All", priority=CarYardPriority.LOW,
+                min_employees=3, max_employees=4, hours_required=12.0, region=CarYardRegion.SOUTH),
+
         CarYard(id=8, name="Stillwell Ford", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2, hours_required=2.0),
+                min_employees=1, max_employees=2, hours_required=2.0, region=CarYardRegion.CENTRAL),
+        CarYard(id=9, name="EasyAuto123 Tender", priority=CarYardPriority.HIGH,
+                min_employees=2, max_employees=4, hours_required=8.0, required_days=[DayOfWeek.MONDAY], region=CarYardRegion.CENTRAL),
+        CarYard(id=10, name="EasyAuto123 Warehouse", priority=CarYardPriority.HIGH,
+                min_employees=2, max_employees=3, hours_required=2.0, required_days=[DayOfWeek.FRIDAY], region=CarYardRegion.CENTRAL),
+        CarYard(id=11, name="Main North Toyota", priority=CarYardPriority.HIGH,
+                min_employees=2, max_employees=3, hours_required=6.0, required_days=[DayOfWeek.FRIDAY], region=CarYardRegion.NORTH),
+        CarYard(id=12, name="MG Reynella", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=5.0, required_days=[DayOfWeek.THURSDAY], region=CarYardRegion.SOUTH),
     ]
 
 
 @pytest.fixture
 def sample_days():
-    return [DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
+    return [DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY, DayOfWeek.FRIDAY, DayOfWeek.SATURDAY]
