@@ -585,6 +585,76 @@ def test_travel_buffer_enforced_between_consecutive_yards():
         "Second yard should start after work duration plus travel buffer"
 
 
+def test_crews_stay_intact_between_consecutive_yards():
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY]
+        ),
+        Employee(
+            id=2,
+            name="Employee 2",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY]
+        ),
+        Employee(
+            id=3,
+            name="Employee 3",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY]
+        ),
+    ]
+
+    car_yards = [
+        CarYard(
+            id=1,
+            name="Morning Yard",
+            priority=CarYardPriority.HIGH,
+            min_employees=2,
+            max_employees=2,
+            hours_required=2.0,
+            region=CarYardRegion.CENTRAL
+        ),
+        CarYard(
+            id=2,
+            name="Midday Yard",
+            priority=CarYardPriority.MEDIUM,
+            min_employees=2,
+            max_employees=2,
+            hours_required=2.0,
+            region=CarYardRegion.CENTRAL,
+            startTime=time(hour=10, minute=0)
+        ),
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        travel_buffer_minutes=30
+    )
+
+    response = client.post("/api/v1/roster",
+                           json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+    timeblocks = sorted(
+        data["stats"]["yard_timeblocks"],
+        key=lambda block: block["start_time"]
+    )
+    assert len(timeblocks) == 2
+
+    morning_employees = set(timeblocks[0]["employees"])
+    midday_employees = set(timeblocks[1]["employees"])
+
+    intersection = morning_employees & midday_employees
+    if intersection:
+        assert morning_employees == midday_employees, \
+            "If a crew carries over to the next yard, no new employees should join mid-day."
+
+
 def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, sample_days):
     """
     Test a realistic schedule scenario with readable output format.

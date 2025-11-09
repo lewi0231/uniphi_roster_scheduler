@@ -392,6 +392,54 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
     EXTRA_EMPLOYEE_PENALTY_WEIGHT = 2000
 
+    partial_overlap_penalties = []
+
+    sorted_cy_ids = sorted(car_yards.keys())
+    for day in days:
+        for idx_a in range(len(sorted_cy_ids)):
+            cy_a = sorted_cy_ids[idx_a]
+            for idx_b in range(idx_a + 1, len(sorted_cy_ids)):
+                cy_b = sorted_cy_ids[idx_b]
+
+                shared_vars = []
+                joiner_vars = []
+                for emp_id in employees.keys():
+                    shared_var = model.NewBoolVar(
+                        f'shared_e{emp_id}_cy{cy_a}_{cy_b}_{day}')
+                    model.Add(shared_var <= x[(emp_id, cy_a, day)])
+                    model.Add(shared_var <= x[(emp_id, cy_b, day)])
+                    model.Add(shared_var >= x[(emp_id, cy_a, day)] +
+                              x[(emp_id, cy_b, day)] - 1)
+                    shared_vars.append(shared_var)
+
+                    joiner_var = model.NewBoolVar(
+                        f'joiner_e{emp_id}_cy{cy_a}_{cy_b}_{day}')
+                    model.Add(joiner_var <= x[(emp_id, cy_b, day)])
+                    model.Add(joiner_var + x[(emp_id, cy_a, day)] <= 1)
+                    model.Add(joiner_var >= x[(emp_id, cy_b, day)] -
+                              x[(emp_id, cy_a, day)])
+                    joiner_vars.append(joiner_var)
+
+                share_any = model.NewBoolVar(
+                    f'share_any_cy{cy_a}_{cy_b}_{day}')
+                for shared_var in shared_vars:
+                    model.Add(shared_var <= share_any)
+                model.Add(share_any <= sum(shared_vars))
+
+                joiner_any = model.NewBoolVar(
+                    f'joiner_any_cy{cy_a}_{cy_b}_{day}')
+                for joiner_var in joiner_vars:
+                    model.Add(joiner_var <= joiner_any)
+                model.Add(joiner_any <= sum(joiner_vars))
+
+                mix_var = model.NewBoolVar(
+                    f'mix_penalty_cy{cy_a}_{cy_b}_{day}')
+                model.Add(mix_var >= share_any + joiner_any - 1)
+                model.Add(mix_var <= share_any)
+                model.Add(mix_var <= joiner_any)
+
+                partial_overlap_penalties.append(mix_var)
+
     objective_components = [
         # Highest priority: cover high-priority yards
         sum(priority_score) * 10000,
@@ -403,7 +451,9 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         # Discourage assigning more employees than necessary
         -sum(extra_employee_penalties) * EXTRA_EMPLOYEE_PENALTY_WEIGHT,
         # Mild penalty on total assignments to avoid redundant coverage
-        -total_assignments * 10
+        -total_assignments * 10,
+        # Penalize partial overlaps where new employees join existing crews mid-day
+        -sum(partial_overlap_penalties) * 2000
     ]
 
     model.Maximize(sum(objective_components))
