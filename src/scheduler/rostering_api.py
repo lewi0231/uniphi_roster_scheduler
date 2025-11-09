@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any, Tuple
 from ortools.sat.python import cp_model
-from datetime import time
+from datetime import time, datetime, timedelta
 from enum import Enum
 
 api = FastAPI(title="Car Yard Rostering API", version="1.0.0")
@@ -71,6 +71,15 @@ class ScheduleRequest(BaseModel):
     # Example: {"group1": [1, 2, 3], "group2": [4, 5]} means yards 1,2,3 often work together
     max_hours_per_day: float = Field(
         default=7.0, ge=3, description="Maximum hours an employee can work per day")
+    earliest_start_time: Optional[time] = Field(
+        default=None,
+        description="Earliest allowable start time for any yard unless overridden by the yard's startTime."
+    )
+    travel_buffer_minutes: int = Field(
+        default=30,
+        ge=0,
+        description="Minimum buffer between consecutive yards for the same day (travel time)."
+    )
 
 
 class Assignment(BaseModel):
@@ -432,8 +441,12 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             shifts_count[assignment.employee_id] += 1
             key = (assignment.car_yard_id, assignment.day)
             if key not in yards_covered:
-                yards_covered[key] = 0
-            yards_covered[key] += 1
+                yards_covered[key] = []
+            yards_covered[key].append(assignment.employee_id)
+
+        day_assignments: Dict[DayOfWeek, List[Tuple[int, List[int]]]] = {}
+        for (cy_id, day), employee_ids in yards_covered.items():
+            day_assignments.setdefault(day, []).append((cy_id, employee_ids))
 
         hours_per_employee_day = {
             f"emp_{emp_id}_day_{day.value}":
@@ -441,15 +454,74 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             for (emp_id, day), minutes_var in employee_day_minutes.items()
         }
 
+        default_start = request.earliest_start_time or time(hour=6, minute=0)
+
+        def add_minutes(base: time, minutes: float) -> time:
+            base_dt = datetime.combine(datetime.today(), base)
+            end_dt = base_dt + timedelta(minutes=minutes)
+            return end_dt.time()
+
+        yard_timeblocks = []
+        travel_buffer = request.travel_buffer_minutes
+
+        priority_rank = {
+            CarYardPriority.HIGH: 0,
+            CarYardPriority.MEDIUM: 1,
+            CarYardPriority.LOW: 2
+        }
+
+        for day in days:
+            if day not in day_assignments:
+                continue
+            day_yards = day_assignments[day]
+            # Sort by yard specific start time then priority then id
+            day_yards = sorted(
+                day_yards,
+                key=lambda item: (
+                    car_yards[item[0]].startTime or default_start,
+                    priority_rank.get(car_yards[item[0]].priority,
+                                      3),
+                    item[0]
+                )
+            )
+            availability: Dict[int, time] = {}
+
+            for cy_id, employee_ids in day_yards:
+                employee_count = len(employee_ids)
+                if employee_count == 0:
+                    continue
+                cy = car_yards[cy_id]
+                earliest_allowed = cy.startTime or default_start
+                start_candidates = [availability.get(emp_id, default_start)
+                                    for emp_id in employee_ids]
+                proposed_start = max([earliest_allowed, *
+                                     start_candidates]) if start_candidates else earliest_allowed
+                total_minutes = cy.hours_required * 60.0
+                per_employee_minutes = total_minutes / employee_count
+                finish_time = add_minutes(proposed_start, per_employee_minutes)
+                for emp_id in employee_ids:
+                    availability[emp_id] = add_minutes(
+                        finish_time, travel_buffer)
+                yard_timeblocks.append({
+                    "car_yard_id": cy_id,
+                    "car_yard_name": cy.name,
+                    "day": day.value,
+                    "start_time": proposed_start.isoformat(timespec="minutes"),
+                    "finish_time": finish_time.isoformat(timespec="minutes"),
+                    "employees": employee_ids,
+                    "minutes_per_employee": per_employee_minutes
+                })
+
         return ScheduleResponse(
             status="optimal" if status == cp_model.OPTIMAL else "feasible",
             assignments=assignments,
             stats={
                 "total_assignments": len(assignments),
                 "shifts_per_employee": shifts_count,
-                "yards_covered": {f"yard_{cy_id}_day_{day.value}": count
-                                  for (cy_id, day), count in yards_covered.items()},
+                "yards_covered": {f"yard_{cy_id}_day_{day.value}": len(employee_ids)
+                                  for (cy_id, day), employee_ids in yards_covered.items()},
                 "hours_per_employee_day": hours_per_employee_day,
+                "yard_timeblocks": yard_timeblocks,
                 "solve_time_seconds": solver.WallTime()
             }
         )

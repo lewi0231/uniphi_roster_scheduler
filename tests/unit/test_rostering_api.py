@@ -12,6 +12,7 @@ from src.scheduler.rostering_api import (
     EmployeeReliabilityRating,
     solve_roster,
 )
+from datetime import datetime, time, timedelta
 from typing import Dict
 from src.scheduler.utils import print_json
 
@@ -53,7 +54,8 @@ def test_basic_roster_generation(sample_employees, sample_car_yards, sample_days
         days=sample_days
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
 
     data = response.json()
@@ -102,7 +104,8 @@ def test_employee_availability_constraint(sample_employees, sample_car_yards):
         days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     check_and_print_response(response, "Employee Availability Constraint")
 
     # With strict weekly coverage, this scenario is infeasible
@@ -130,7 +133,8 @@ def test_impossible_constraint():
         days=[DayOfWeek.TUESDAY]  # Need Tuesday but no one available
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
 
     # Weekly coverage requirement makes this infeasible
     assert response.status_code == 400
@@ -162,7 +166,8 @@ def test_ranking_preference():
         days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY]
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
 
     data = response.json()
@@ -190,7 +195,8 @@ def test_one_employee_one_yard():
         days=[DayOfWeek.MONDAY]
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
 
     data = response.json()
@@ -223,7 +229,8 @@ def test_workload_balance():
         days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY]
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
 
     data = response.json()
@@ -280,7 +287,8 @@ def test_priority_based_assignment():
         days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     check_and_print_response(response, "Priority-Based Assignment")
 
     assert response.status_code == 200
@@ -355,7 +363,8 @@ def test_hours_constraint():
         max_hours_per_day=5.0
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     check_and_print_response(response, "Hours Constraint Test")
 
     assert response.status_code == 200
@@ -395,7 +404,8 @@ def test_hours_constraint_multiple_yards_allowed():
         max_hours_per_day=5.0
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
     data = response.json()
 
@@ -432,7 +442,8 @@ def test_hours_constraint_with_default():
         days=[DayOfWeek.MONDAY]
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
     data = response.json()
 
@@ -440,6 +451,138 @@ def test_hours_constraint_with_default():
     hours_stats = data["stats"]["hours_per_employee_day"]
     for key, hours in hours_stats.items():
         assert hours <= 7.0 + 1e-6, f"{key} exceeds default 7.0 hours: {hours}"
+
+
+def test_start_times_respect_yard_overrides_and_buffer():
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY]
+        )
+    ]
+
+    car_yards = [
+        CarYard(
+            id=1,
+            name="Early Yard",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            region=CarYardRegion.CENTRAL
+        ),
+        CarYard(
+            id=2,
+            name="Late Start Yard",
+            priority=CarYardPriority.MEDIUM,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            region=CarYardRegion.CENTRAL,
+            startTime=time(hour=8, minute=30)
+        ),
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        travel_buffer_minutes=30
+    )
+
+    response = client.post("/api/v1/roster",
+                           json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+
+    timeblocks = {
+        block["car_yard_id"]: block
+        for block in data["stats"]["yard_timeblocks"]
+    }
+
+    assert set(timeblocks.keys()) == {1, 2}
+
+    early_block = timeblocks[1]
+    late_block = timeblocks[2]
+
+    assert early_block["start_time"] == "06:00"
+    assert early_block["finish_time"] == "07:00"
+
+    assert late_block["start_time"] == "08:30", \
+        "Late yard should respect its specific startTime override"
+    assert late_block["finish_time"] == "09:30"
+
+    early_finish = datetime.strptime(
+        early_block["finish_time"], "%H:%M")
+    late_start = datetime.strptime(
+        late_block["start_time"], "%H:%M")
+    assert late_start - early_finish >= timedelta(minutes=30)
+
+
+def test_travel_buffer_enforced_between_consecutive_yards():
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY]
+        )
+    ]
+
+    car_yards = [
+        CarYard(
+            id=1,
+            name="First Yard",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            region=CarYardRegion.CENTRAL
+        ),
+        CarYard(
+            id=2,
+            name="Second Yard",
+            priority=CarYardPriority.MEDIUM,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            region=CarYardRegion.CENTRAL
+        ),
+    ]
+
+    travel_buffer = 45
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        travel_buffer_minutes=travel_buffer
+    )
+
+    response = client.post("/api/v1/roster",
+                           json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+
+    timeblocks = {
+        block["car_yard_id"]: block
+        for block in data["stats"]["yard_timeblocks"]
+    }
+    assert set(timeblocks.keys()) == {1, 2}
+
+    first_block = timeblocks[1]
+    second_block = timeblocks[2]
+
+    first_start = datetime.strptime(first_block["start_time"], "%H:%M")
+    first_finish = datetime.strptime(first_block["finish_time"], "%H:%M")
+    second_start = datetime.strptime(second_block["start_time"], "%H:%M")
+
+    assert first_start.time() == time(6, 0)
+    assert first_finish - first_start == timedelta(hours=1)
+    assert second_start - first_finish >= timedelta(minutes=travel_buffer)
+    assert second_start.time() == time(7, 45), \
+        "Second yard should start after work duration plus travel buffer"
 
 
 def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, sample_days):
@@ -464,7 +607,8 @@ def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, 
         max_hours_per_day=5.0
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
 
     # Check if we got an error and print details
     if response.status_code != 200:
@@ -538,6 +682,11 @@ def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, 
         print("📅 REALISTIC SCHEDULE - READABLE FORMAT")
         print("="*80)
 
+        yard_timeblocks = data["stats"].get("yard_timeblocks", [])
+        timeblock_lookup = {
+            (block["day"], block["car_yard_id"]): block for block in yard_timeblocks
+        }
+
         for day_schedule in schedule_list:
             print(f"\n{'─'*80}")
             print(f"📆 {day_schedule['day'].upper()}")
@@ -554,12 +703,19 @@ def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, 
                 employees = [emp["employee_name"] for emp in yard["employees"]]
                 num_employees = len(employees)
 
+                block = timeblock_lookup.get(
+                    (day_schedule["day"], yard["yard_id"]))
+                start_time = block["start_time"] if block else "N/A"
+                finish_time = block["finish_time"] if block else "N/A"
+
                 print(f"\n  🏢 {yard_name} (ID: {yard['yard_id']})")
                 print(
                     f"     ⏱️  Hours: {hours:.1f}h | 👥 Employees: {num_employees}")
+                print(
+                    f"     🕒  Start: {start_time} | Finish: {finish_time}")
                 print(f"     👷 Assigned: {', '.join(employees)}")
 
-            total_day_hours += hours
+                total_day_hours += hours
 
             print(
                 f"\n  📊 Total yard-hours for {day_schedule['day']}: {total_day_hours:.1f}h")
@@ -590,6 +746,15 @@ def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, 
 
         # Also print JSON format for programmatic access
         print_json(schedule_list, "Schedule (JSON Format)")
+
+        yard_timeblocks = data["stats"].get("yard_timeblocks", [])
+        print("\n🕒 Yard Timeblocks:")
+        for block in yard_timeblocks:
+            print(
+                f"  Day: {block['day']}, Yard: {block['car_yard_name']} "
+                f"({block['car_yard_id']}), Start: {block['start_time']}, "
+                f"Finish: {block['finish_time']}, Employees: {block['employees']}"
+            )
 
     # Assertions
     assert len(schedule_list) == len(
@@ -677,7 +842,8 @@ def test_region_exclusion():
         max_hours_per_day=5.0
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
     data = response.json()
     assigned = {assignment["employee_id"]
@@ -716,7 +882,8 @@ def test_required_days_constraint():
         max_hours_per_day=6.0
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
     data = response.json()
     assignment_days = {assignment["day"] for assignment in data["assignments"]}
@@ -762,7 +929,8 @@ def test_per_week_gap_constraint():
         max_hours_per_day=6.0
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
     data = response.json()
     yard_days = sorted(
@@ -823,7 +991,8 @@ def test_linked_yard_gap_constraint():
         max_hours_per_day=7.0
     )
 
-    response = client.post("/api/v1/roster", json=request.model_dump())
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
     data = response.json()
 

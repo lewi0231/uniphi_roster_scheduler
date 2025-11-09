@@ -1,6 +1,6 @@
 
 # Fixtures for reusable test data
-from datetime import date
+from datetime import date, time
 from src.scheduler.rostering_api import CarYard, CarYardPriority, CarYardRegion, DayOfWeek, Employee, EmployeeReliabilityRating
 import pytest
 
@@ -71,9 +71,9 @@ def sample_car_yards():
         CarYard(id=8, name="Stillwell Ford", priority=CarYardPriority.LOW,
                 min_employees=1, max_employees=2, hours_required=2.0, region=CarYardRegion.CENTRAL),
         CarYard(id=9, name="EasyAuto123 Tender", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=4, hours_required=8.0, required_days=[DayOfWeek.MONDAY], region=CarYardRegion.CENTRAL),
+                min_employees=2, max_employees=4, hours_required=8.0, required_days=[DayOfWeek.MONDAY], region=CarYardRegion.CENTRAL, startTime=time(hour=8, minute=30)),
         CarYard(id=10, name="EasyAuto123 Warehouse", priority=CarYardPriority.HIGH,
-                min_employees=2, max_employees=3, hours_required=2.0, required_days=[DayOfWeek.FRIDAY], region=CarYardRegion.CENTRAL),
+                min_employees=2, max_employees=3, hours_required=2.0, required_days=[DayOfWeek.FRIDAY], region=CarYardRegion.CENTRAL, startTime=time(hour=8, minute=30)),
         CarYard(id=11, name="Main North Toyota", priority=CarYardPriority.HIGH,
                 min_employees=2, max_employees=3, hours_required=6.0, required_days=[DayOfWeek.FRIDAY], region=CarYardRegion.NORTH),
         CarYard(id=12, name="MG Reynella", priority=CarYardPriority.HIGH,
