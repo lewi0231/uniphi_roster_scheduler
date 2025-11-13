@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import List, Dict, Optional, Any, Tuple
 from ortools.sat.python import cp_model
 from datetime import time, datetime, timedelta
 from enum import Enum
 import logging
+import re
 
 api = FastAPI(title="Car Yard Rostering API", version="1.0.0")
 
@@ -110,11 +111,136 @@ class RosterStructure(BaseModel):
     days: List[DayRoster]
 
 
+class YardTimeblock(BaseModel):
+    """Timeblock for a yard on a specific day with employee assignments"""
+    car_yard_id: int
+    car_yard_name: str
+    day: str  # Day of week as string (e.g., "monday")
+    start_time: str  # ISO format time (e.g., "06:00")
+    finish_time: str  # ISO format time (e.g., "14:00")
+    employees: List[int]  # List of employee IDs
+    minutes_per_employee: float
+    per_employee_hours: float
+
+
+class ScheduleStats(BaseModel):
+    """Statistics about the generated schedule"""
+    total_assignments: int
+    shifts_per_employee: Dict[int, int]  # employee_id -> number of shifts
+    # "yard_{cy_id}_day_{day.value}" -> number of employees
+    yards_covered: Dict[str, int]
+    # "emp_{emp_id}_day_{day.value}" -> hours worked
+    hours_per_employee_day: Dict[str, float]
+    yard_timeblocks: List[YardTimeblock]
+    solve_time_seconds: float
+
+    @computed_field
+    @property
+    def employee_hours_by_day(self) -> Dict[str, Dict[int, float]]:
+        """
+        Reorganized hours data grouped by day for easy frontend access.
+        Makes it easy to get all employees' hours for a specific day.
+
+        Returns:
+            Dict[str, Dict[int, float]]: day -> {employee_id: hours}
+            Example: {"monday": {1: 4.5, 2: 3.0}, "tuesday": {1: 2.0}}
+
+        Usage:
+            # Get all employees' hours for Monday
+            monday_hours = stats.employee_hours_by_day["monday"]
+            # Returns: {1: 4.5, 2: 3.0}
+
+            # Get a specific employee's hours for Monday
+            employee_1_monday = stats.employee_hours_by_day["monday"].get(1, 0.0)
+        """
+        result: Dict[str, Dict[int, float]] = {}
+
+        # Parse keys like "emp_1_day_monday" to extract employee_id and day
+        # Pattern: "emp_{employee_id}_day_{day}"
+        pattern = r"emp_(\d+)_day_([a-z]+)"
+
+        for key, hours in self.hours_per_employee_day.items():
+            match = re.match(pattern, key)
+            if match:
+                employee_id = int(match.group(1))
+                day = match.group(2)
+
+                if day not in result:
+                    result[day] = {}
+                result[day][employee_id] = hours
+
+        return result
+
+    @computed_field
+    @property
+    def hours_by_employee(self) -> Dict[int, Dict[str, float]]:
+        """
+        Reorganized hours data grouped by employee for easy access.
+        Makes it easy to get all days' hours for a specific employee.
+
+        Returns:
+            Dict[int, Dict[str, float]]: employee_id -> {day: hours}
+            Example: {1: {"monday": 4.5, "tuesday": 2.0}, 2: {"monday": 3.0}}
+
+        Usage:
+            # Get all days' hours for employee 1
+            employee_1_hours = stats.hours_by_employee[1]
+            # Returns: {"monday": 4.5, "tuesday": 2.0}
+
+            # Get employee 1's hours for Monday
+            employee_1_monday = stats.hours_by_employee[1].get("monday", 0.0)
+        """
+        result: Dict[int, Dict[str, float]] = {}
+
+        # Parse keys like "emp_1_day_monday" to extract employee_id and day
+        pattern = r"emp_(\d+)_day_([a-z]+)"
+
+        for key, hours in self.hours_per_employee_day.items():
+            match = re.match(pattern, key)
+            if match:
+                employee_id = int(match.group(1))
+                day = match.group(2)
+
+                if employee_id not in result:
+                    result[employee_id] = {}
+                result[employee_id][day] = hours
+
+        return result
+
+    @computed_field
+    @property
+    def employee_total_hours(self) -> Dict[int, float]:
+        """
+        Total hours worked by each employee across all days.
+        Useful for summary views and workload analysis.
+
+        Returns:
+            Dict[int, float]: employee_id -> total hours
+            Example: {1: 6.5, 2: 3.0}
+
+        Usage:
+            # Get total hours for employee 1
+            total = stats.employee_total_hours[1]
+            # Returns: 6.5
+        """
+        result: Dict[int, float] = {}
+
+        pattern = r"emp_(\d+)_day_([a-z]+)"
+
+        for key, hours in self.hours_per_employee_day.items():
+            match = re.match(pattern, key)
+            if match:
+                employee_id = int(match.group(1))
+                result[employee_id] = result.get(employee_id, 0.0) + hours
+
+        return result
+
+
 class ScheduleResponse(BaseModel):
     status: str
     assignments: List[Assignment]
     roster: RosterStructure
-    stats: Dict[str, Any]
+    stats: ScheduleStats
 
 
 # Objective function weights (constants)
@@ -822,7 +948,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             end_dt = base_dt + timedelta(minutes=minutes)
             return end_dt.time()
 
-        yard_timeblocks = []
+        yard_timeblocks: List[YardTimeblock] = []
         travel_buffer = request.travel_buffer_minutes
 
         priority_rank = {
@@ -895,16 +1021,16 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                     availability[emp_id] = add_minutes(
                         finish_time, travel_buffer)
 
-                yard_timeblocks.append({
-                    "car_yard_id": cy_id,
-                    "car_yard_name": cy.name,
-                    "day": day.value,
-                    "start_time": proposed_start.isoformat(timespec="minutes"),
-                    "finish_time": finish_time.isoformat(timespec="minutes"),
-                    "employees": employee_ids,
-                    "minutes_per_employee": per_employee_hours * MINUTES_PER_HOUR,
-                    "per_employee_hours": per_employee_hours  # Store for reuse
-                })
+                yard_timeblocks.append(YardTimeblock(
+                    car_yard_id=cy_id,
+                    car_yard_name=cy.name,
+                    day=day.value,
+                    start_time=proposed_start.isoformat(timespec="minutes"),
+                    finish_time=finish_time.isoformat(timespec="minutes"),
+                    employees=employee_ids,
+                    minutes_per_employee=per_employee_hours * MINUTES_PER_HOUR,
+                    per_employee_hours=per_employee_hours
+                ))
 
         # Validate that no employee exceeds max_hours_per_day
         # Use the solver's actual work distribution for validation (not equal distribution)
@@ -923,7 +1049,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         }
         # Create lookup for per_employee_hours from yard_timeblocks
         per_employee_hours_lookup = {
-            (block["car_yard_id"], DayOfWeek(block["day"])): block.get("per_employee_hours", 0.0)
+            (block.car_yard_id, DayOfWeek(block.day)): block.per_employee_hours
             for block in yard_timeblocks
         }
         for (cy_id, day), employee_ids in yards_covered.items():
@@ -961,9 +1087,9 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         # Create mapping from (car_yard_id, day) to (start_time, finish_time) from yard_timeblocks
         yard_timing_map: Dict[Tuple[int, DayOfWeek], Tuple[str, str]] = {}
         for block in yard_timeblocks:
-            day = DayOfWeek(block["day"])
-            key = (block["car_yard_id"], day)
-            yard_timing_map[key] = (block["start_time"], block["finish_time"])
+            day = DayOfWeek(block.day)
+            key = (block.car_yard_id, day)
+            yard_timing_map[key] = (block.start_time, block.finish_time)
 
         # Create Assignment objects with start and finish times
         assignments = []
@@ -987,16 +1113,16 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         roster_by_day: Dict[DayOfWeek, List[YardSchedule]] = {}
 
         for block in yard_timeblocks:
-            day = DayOfWeek(block["day"])
+            day = DayOfWeek(block.day)
             worker_names = [employee_name_map[emp_id]
-                            for emp_id in block["employees"]]
+                            for emp_id in block.employees]
 
             yard_schedule = YardSchedule(
-                car_yard_id=block["car_yard_id"],
-                car_yard_name=block["car_yard_name"],
+                car_yard_id=block.car_yard_id,
+                car_yard_name=block.car_yard_name,
                 workers=worker_names,
-                start_time=block["start_time"],
-                finish_time=block["finish_time"]
+                start_time=block.start_time,
+                finish_time=block.finish_time
             )
 
             if day not in roster_by_day:
@@ -1011,19 +1137,22 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
         roster_structure = RosterStructure(days=day_rosters)
 
+        # Create typed stats object
+        stats = ScheduleStats(
+            total_assignments=len(assignments),
+            shifts_per_employee=shifts_count,
+            yards_covered={f"yard_{cy_id}_day_{day.value}": len(employee_ids)
+                           for (cy_id, day), employee_ids in yards_covered.items()},
+            hours_per_employee_day=hours_per_employee_day,
+            yard_timeblocks=yard_timeblocks,
+            solve_time_seconds=solver.WallTime()
+        )
+
         return ScheduleResponse(
             status="optimal" if status == cp_model.OPTIMAL else "feasible",
             assignments=assignments,
             roster=roster_structure,
-            stats={
-                "total_assignments": len(assignments),
-                "shifts_per_employee": shifts_count,
-                "yards_covered": {f"yard_{cy_id}_day_{day.value}": len(employee_ids)
-                                  for (cy_id, day), employee_ids in yards_covered.items()},
-                "hours_per_employee_day": hours_per_employee_day,
-                "yard_timeblocks": yard_timeblocks,
-                "solve_time_seconds": solver.WallTime()
-            }
+            stats=stats
         )
     else:
         raise HTTPException(
