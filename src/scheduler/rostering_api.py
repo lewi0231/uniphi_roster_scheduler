@@ -1177,6 +1177,18 @@ async def root():
     }
 
 
+@api.get("/health")
+async def health():
+    """Liveness probe endpoint"""
+    return {"status": "healthy"}
+
+
+@api.get("/ready")
+async def ready():
+    """Readiness probe endpoint"""
+    return {"status": "ready"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(api, host="0.0.0.0", port=8888)

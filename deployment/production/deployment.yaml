@@ -1,0 +1,106 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-deployment
+  namespace: production
+  labels:
+    app: fastapi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastapi
+  template:
+    metadata:
+      labels:
+        app: fastapi
+    spec:
+      imagePullSecrets:
+        - name: ghcr-credentials
+      containers:
+        - name: fastapi
+          image: ghcr.io/lewi0231/uniphi_roster_scheduler:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8888
+              name: http
+              protocol: TCP
+
+          # Environment variables from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: fastapi-config
+
+          # Environment variables from Secret
+          # TODO - Add API key authentication later
+          env:
+          # - name: DATABASE_URL
+          #   valueFrom:
+          #     secretKeyRef:
+          #       name: fastapi-secrets
+          #       key: DATABASE_URL
+          # - name: API_KEY
+          #   valueFrom:
+          #     secretKeyRef:
+          #       name: fastapi-secrets
+          #       key: API_KEY
+
+          # Resource limits and requests
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+          # Liveness probe - checks if container is alive
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8888
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Readiness probe - checks if container is ready to serve traffic
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8888
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+      # Restart policy
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-service
+  namespace: production
+  labels:
+    app: fastapi
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8888
+      targetPort: 8888
+      protocol: TCP
+      name: http
+  selector:
+    app: fastapi

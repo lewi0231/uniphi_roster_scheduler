@@ -1,0 +1,10 @@
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastapi-config
+  namespace: production
+data:
+  LOG_LEVEL: "info"
+  ENVIRONMENT: "production"
