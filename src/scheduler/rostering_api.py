@@ -1,6 +1,7 @@
 import platform
 import sys
 from fastapi import FastAPI, HTTPException, Request
+from dotenv import load_dotenv
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, computed_field, ValidationError
@@ -13,6 +14,9 @@ import os
 import re
 import json
 import traceback
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -337,7 +341,9 @@ PRIORITY_WEIGHT_LOW = 10
 GROUPING_BONUS_BASE_WEIGHT = 50
 
 # Solver configuration
-DEFAULT_SOLVER_TIMEOUT_SECONDS = 10.0
+# Solver timeout - can be overridden via SOLVER_TIMEOUT_SECONDS environment variable
+DEFAULT_SOLVER_TIMEOUT_SECONDS = float(
+    os.getenv("SOLVER_TIMEOUT_SECONDS", "30.0"))
 
 # Time constants
 DEFAULT_EARLIEST_START_HOUR = 6

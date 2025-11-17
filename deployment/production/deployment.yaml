@@ -47,13 +47,14 @@ spec:
           #       key: API_KEY
 
           # Resource limits and requests
+          # Increased for constraint solver performance
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
-              memory: "512Mi"
+              memory: "256Mi"
               cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "2000m"
 
           # Liveness probe - checks if container is alive
           livenessProbe:
