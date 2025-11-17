@@ -1,13 +1,85 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, computed_field
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from pydantic import BaseModel, Field, computed_field, ValidationError
 from typing import List, Dict, Optional, Any, Tuple
 from ortools.sat.python import cp_model
 from datetime import time, datetime, timedelta
 from enum import Enum
 import logging
+import os
 import re
+import json
+import traceback
+
+# Configure logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 api = FastAPI(title="Car Yard Rostering API", version="1.0.0")
+
+
+# Request logging middleware
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        logger.info(f"Request: {request.method} {request.url.path}")
+        logger.debug(f"Request headers: {dict(request.headers)}")
+
+        # Log request body for POST requests
+        if request.method == "POST":
+            try:
+                body = await request.body()
+                if body:
+                    try:
+                        body_json = json.loads(body)
+                        logger.info(
+                            f"Request body: {json.dumps(body_json, indent=2, default=str)}")
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            f"Request body (non-JSON): {body.decode('utf-8', errors='ignore')[:500]}")
+            except Exception as e:
+                logger.warning(f"Could not read request body: {e}")
+
+        response = await call_next(request)
+        logger.info(
+            f"Response: {response.status_code} for {request.method} {request.url.path}")
+        return response
+
+
+api.add_middleware(RequestLoggingMiddleware)
+
+
+# Exception handler for validation errors
+@api.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    logger.error(f"Pydantic ValidationError: {exc}")
+    logger.debug(f"ValidationError details: {exc.errors()}")
+    logger.debug(f"Request path: {request.url.path}")
+    logger.debug(f"Request method: {request.method}")
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": f"Validation error: {str(exc)}",
+            "errors": exc.errors()
+        }
+    )
+
+
+# Exception handler for HTTP exceptions
+@api.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.error(f"HTTPException: {exc.status_code} - {exc.detail}")
+    logger.debug(f"Request path: {request.url.path}")
+    logger.debug(f"Request method: {request.method}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
 
 
 class DayOfWeek(str, Enum):
@@ -364,39 +436,57 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     3. Encourage grouping (yards in same group done together)
     4. Balance workload across employees
     """
-    # Initialize logger once
-    logger = logging.getLogger(__name__)
-
     # Input validation
+    logger.debug("Starting input validation")
+
     if len(request.employees) != len({emp.id for emp in request.employees}):
+        employee_ids = [emp.id for emp in request.employees]
+        duplicates = [
+            eid for eid in employee_ids if employee_ids.count(eid) > 1]
+        error_msg = f"Duplicate employee IDs found: {set(duplicates)}. Each employee must have a unique ID."
+        logger.error(error_msg)
+        logger.debug(f"All employee IDs: {employee_ids}")
         raise HTTPException(
             status_code=400,
-            detail="Duplicate employee IDs found. Each employee must have a unique ID."
+            detail=error_msg
         )
 
     if len(request.car_yards) != len({cy.id for cy in request.car_yards}):
+        yard_ids = [cy.id for cy in request.car_yards]
+        duplicates = [yid for yid in yard_ids if yard_ids.count(yid) > 1]
+        error_msg = f"Duplicate car yard IDs found: {set(duplicates)}. Each car yard must have a unique ID."
+        logger.error(error_msg)
+        logger.debug(f"All car yard IDs: {yard_ids}")
         raise HTTPException(
             status_code=400,
-            detail="Duplicate car yard IDs found. Each car yard must have a unique ID."
+            detail=error_msg
         )
 
     if not request.employees:
+        error_msg = "At least one employee is required."
+        logger.error(error_msg)
         raise HTTPException(
             status_code=400,
-            detail="At least one employee is required."
+            detail=error_msg
         )
 
     if not request.car_yards:
+        error_msg = "At least one car yard is required."
+        logger.error(error_msg)
         raise HTTPException(
             status_code=400,
-            detail="At least one car yard is required."
+            detail=error_msg
         )
 
     if not request.days:
+        error_msg = "At least one day is required."
+        logger.error(error_msg)
         raise HTTPException(
             status_code=400,
-            detail="At least one day is required."
+            detail=error_msg
         )
+
+    logger.debug("Input validation passed")
 
     # Validate min <= max for each yard
     for cy in request.car_yards:
@@ -1166,7 +1256,49 @@ async def generate_roster(request: ScheduleRequest):
     """
     Generate an optimal roster for car yard cleaning
     """
-    return solve_roster(request)
+    try:
+        logger.info("=== Starting roster generation ===")
+        logger.info(
+            f"Request received with {len(request.employees)} employees, {len(request.car_yards)} car yards, {len(request.days)} days")
+
+        # Log request details at debug level
+        logger.debug(
+            f"Employees: {[{'id': e.id, 'name': e.name, 'ranking': e.ranking.value, 'available_days': [d.value for d in e.available_days]} for e in request.employees]}")
+        logger.debug(f"Car yards: {[{'id': cy.id, 'name': cy.name, 'priority': cy.priority.value, 'region': cy.region.value, 'min_employees': cy.min_employees, 'max_employees': cy.max_employees} for cy in request.car_yards]}")
+        logger.debug(f"Days: {[d.value for d in request.days]}")
+        logger.debug(f"Max hours per day: {request.max_hours_per_day}")
+        logger.debug(f"Travel buffer: {request.travel_buffer_minutes} minutes")
+
+        result = solve_roster(request)
+
+        logger.info(
+            f"Roster generated successfully: {result.status}, {len(result.assignments)} assignments")
+        logger.debug(
+            f"Stats: {result.stats.total_assignments} total assignments, solve time: {result.stats.solve_time_seconds:.2f}s")
+
+        return result
+
+    except HTTPException as e:
+        logger.error(
+            f"HTTPException in roster generation: {e.status_code} - {e.detail}")
+        logger.debug(f"HTTPException traceback: {traceback.format_exc()}")
+        raise
+    except ValidationError as e:
+        logger.error(f"ValidationError in roster generation: {e}")
+        logger.debug(f"ValidationError details: {e.errors()}")
+        logger.debug(f"ValidationError traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Validation error: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in roster generation: {type(e).__name__}: {str(e)}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {type(e).__name__}: {str(e)}"
+        )
 
 
 @api.get("/")

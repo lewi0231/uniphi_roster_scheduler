@@ -6,5 +6,5 @@ metadata:
   name: fastapi-config
   namespace: production
 data:
-  LOG_LEVEL: "info"
+  LOG_LEVEL: "DEBUG"
   ENVIRONMENT: "production"
