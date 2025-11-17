@@ -1,3 +1,5 @@
+import platform
+import sys
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -23,27 +25,29 @@ logger = logging.getLogger(__name__)
 
 api = FastAPI(title="Car Yard Rostering API", version="1.0.0")
 
+# Log environment info on startup
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Platform: {platform.platform()}")
+logger.info(f"Environment: {os.getenv('ENVIRONMENT', 'not set')}")
+logger.info(f"Log level: {LOG_LEVEL}")
+
+# Log OR-Tools version if available
+try:
+    import ortools
+    logger.info(f"OR-Tools version: {ortools.__version__}")
+except:
+    logger.warning("Could not determine OR-Tools version")
+
 
 # Request logging middleware
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         logger.info(f"Request: {request.method} {request.url.path}")
         logger.debug(f"Request headers: {dict(request.headers)}")
-
-        # Log request body for POST requests
-        if request.method == "POST":
-            try:
-                body = await request.body()
-                if body:
-                    try:
-                        body_json = json.loads(body)
-                        logger.info(
-                            f"Request body: {json.dumps(body_json, indent=2, default=str)}")
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"Request body (non-JSON): {body.decode('utf-8', errors='ignore')[:500]}")
-            except Exception as e:
-                logger.warning(f"Could not read request body: {e}")
+        logger.debug(
+            f"Content-Type: {request.headers.get('content-type', 'not set')}")
+        logger.debug(
+            f"Content-Length: {request.headers.get('content-length', 'not set')}")
 
         response = await call_next(request)
         logger.info(
@@ -984,9 +988,90 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     model.Maximize(sum(objective_components))
 
     # Solve
+    logger.info("Starting CP-SAT solver")
+    logger.debug(f"Solver timeout: {DEFAULT_SOLVER_TIMEOUT_SECONDS} seconds")
+
+    # Log model statistics before solving
+    logger.debug(
+        f"Model has {len(x)} decision variables (employee-yard-day assignments)")
+    logger.debug(
+        f"Model has {len(covered)} coverage variables (yard-day coverage)")
+    logger.debug(
+        f"Total employees: {len(employees)}, Total yards: {len(car_yards)}, Total days: {len(days)}")
+
+    # Create a hash of key input data for comparison
+    import hashlib
+    input_data_str = json.dumps({
+        "employee_count": len(employees),
+        "yard_count": len(car_yards),
+        "day_count": len(days),
+        "employee_availabilities": {eid: len(emp.available_days) for eid, emp in employees.items()},
+        "yard_requirements": {cyid: (cy.min_employees, cy.max_employees) for cyid, cy in car_yards.items()},
+        "max_hours": request.max_hours_per_day
+    }, sort_keys=True)
+    input_hash = hashlib.md5(input_data_str.encode()).hexdigest()
+    logger.info(f"Input data hash (for comparison): {input_hash}")
+
+    # Log feasibility analysis before solving
+    total_employee_days_available = sum(
+        len(emp.available_days) for emp in employees.values()
+    )
+    total_yard_days = len(car_yards) * len(days)
+    min_employees_needed = sum(cy.min_employees for cy in car_yards.values())
+    max_employees_needed = sum(cy.max_employees for cy in car_yards.values())
+
+    logger.info(
+        f"Feasibility check: {len(employees)} employees, {total_employee_days_available} total employee-days available")
+    logger.info(
+        f"Coverage needed: {len(car_yards)} yards × {len(days)} days = {total_yard_days} yard-days")
+    logger.info(
+        f"Employee availability: {[(e.id, e.name, len(e.available_days), [d.value for d in e.available_days]) for e in employees.values()]}")
+    logger.debug(
+        f"Min employees needed per yard: {min_employees_needed}, Max: {max_employees_needed}")
+
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = DEFAULT_SOLVER_TIMEOUT_SECONDS
     status = solver.Solve(model)
+
+    # Log solver status
+    status_names = {
+        cp_model.OPTIMAL: "OPTIMAL",
+        cp_model.FEASIBLE: "FEASIBLE",
+        cp_model.INFEASIBLE: "INFEASIBLE",
+        cp_model.MODEL_INVALID: "MODEL_INVALID",
+        cp_model.UNKNOWN: "UNKNOWN"
+    }
+    status_name = status_names.get(status, f"UNKNOWN_STATUS_{status}")
+    logger.info(f"Solver status: {status_name} (code: {status})")
+    logger.info(f"Solver wall time: {solver.WallTime():.2f} seconds")
+    logger.debug(
+        f"Solver statistics: {solver.NumBooleans()} booleans, {solver.NumBranches()} branches, {solver.NumConflicts()} conflicts")
+
+    if status == cp_model.INFEASIBLE:
+        logger.error(
+            "Solver returned INFEASIBLE - constraints cannot be satisfied")
+        logger.error("Possible reasons:")
+        logger.error(
+            f"  - Not enough employees available (have {len(employees)} employees)")
+        logger.error(
+            f"  - Employee availability too restrictive (total {total_employee_days_available} employee-days)")
+        logger.error(
+            f"  - Yard requirements too high (need {min_employees_needed}-{max_employees_needed} employees per assignment)")
+        logger.error(
+            f"  - Max hours per day too restrictive ({request.max_hours_per_day} hours)")
+        # Check for employees with no availability
+        no_availability = [
+            e for e in employees.values() if not e.available_days]
+        if no_availability:
+            logger.error(
+                f"  - Employees with NO available days: {[(e.id, e.name) for e in no_availability]}")
+    elif status == cp_model.UNKNOWN:
+        logger.warning(
+            "Solver returned UNKNOWN - may have timed out or hit resource limits")
+        logger.warning(
+            f"  - Timeout was {DEFAULT_SOLVER_TIMEOUT_SECONDS} seconds")
+        logger.warning(
+            f"  - Actual solve time: {solver.WallTime():.2f} seconds")
 
     # Build response (same as before)
     # First collect raw assignment data (without creating Assignment objects yet)
@@ -1245,9 +1330,23 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             stats=stats
         )
     else:
+        # Provide detailed error message based on solver status
+        if status == cp_model.INFEASIBLE:
+            no_availability = [
+                e for e in employees.values() if not e.available_days]
+            detail = f"No feasible solution found. The constraints cannot be satisfied. "
+            if no_availability:
+                detail += f"Employees with no available days: {[e.name for e in no_availability]}. "
+            detail += f"Check employee availability, yard requirements, and max hours per day ({request.max_hours_per_day}h)."
+        elif status == cp_model.UNKNOWN:
+            detail = f"Solver could not determine feasibility (may have timed out after {DEFAULT_SOLVER_TIMEOUT_SECONDS}s). Try increasing timeout or relaxing constraints."
+        else:
+            detail = f"No feasible solution found. Solver status: {status_name}. Check constraints (availability, min/max employees per yard)"
+
+        logger.error(f"Raising HTTPException: {detail}")
         raise HTTPException(
             status_code=400,
-            detail="No feasible solution found. Check constraints (availability, min/max employees per yard)"
+            detail=detail
         )
 
 
@@ -1259,7 +1358,20 @@ async def generate_roster(request: ScheduleRequest):
     try:
         logger.info("=== Starting roster generation ===")
         logger.info(
-            f"Request received with {len(request.employees)} employees, {len(request.car_yards)} car yards, {len(request.days)} days")
+            f"Pydantic parsed request: {len(request.employees)} employees, {len(request.car_yards)} car yards, {len(request.days)} days")
+
+        # Log the actual Pydantic model data to see what was parsed
+        logger.debug(
+            f"Parsed request model: employees={len(request.employees)}, car_yards={len(request.car_yards)}, days={len(request.days)}")
+        logger.debug(f"Request model dict keys: {request.model_dump().keys()}")
+
+        # Log serialized request to compare with what was sent
+        try:
+            request_dict = request.model_dump()
+            logger.debug(
+                f"Full parsed request (first 2000 chars): {json.dumps(request_dict, indent=2, default=str)[:2000]}")
+        except Exception as e:
+            logger.warning(f"Could not serialize request model: {e}")
 
         # Log request details at debug level
         logger.debug(
