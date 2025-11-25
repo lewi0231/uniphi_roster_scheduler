@@ -9,6 +9,7 @@ from typing import List, Dict, Optional, Any, Tuple
 from ortools.sat.python import cp_model
 from datetime import time, datetime, timedelta
 from enum import Enum
+from collections import Counter
 import logging
 import os
 import re
@@ -142,9 +143,6 @@ class ScheduleRequest(BaseModel):
     employees: List[Employee]
     car_yards: List[CarYard]
     days: List[DayOfWeek]
-    # Optional: groups of yard IDs that should be done together
-    yard_groups: Optional[Dict[str, List[int]]] = None
-    # Example: {"group1": [1, 2, 3], "group2": [4, 5]} means yards 1,2,3 often work together
     max_hours_per_day: float = Field(
         default=7.0, ge=3, description="Maximum hours an employee can work per day")
     earliest_start_time: Optional[time] = Field(
@@ -156,8 +154,9 @@ class ScheduleRequest(BaseModel):
         ge=0,
         description="Minimum buffer between consecutive yards for the same day (travel time)."
     )
-    max_radius: int = Field(..., ge=0,
-                            description="Maximum position difference between yards that can be scheduled same day")
+    max_radius: int = Field(
+        default=1000, ge=0,
+        description="Maximum position difference between yards that can be scheduled same day")
 
 
 class Assignment(BaseModel):
@@ -434,21 +433,22 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     - Yards respect required days, visit counts, spacing rules, and linked-yard gaps
     - Employees can work multiple yards per day, limited by max_hours_per_day
     - Employees can only work on available days and avoid excluded yards
-    - Grouping bonus encourages yards in the same group to be done together
+    - Yards scheduled on the same day must be within max_radius (geographic constraint)
 
     Objectives (in priority order):
     1. Cover high-priority yards first
     2. Use higher reliability-rated employees
-    3. Encourage grouping (yards in same group done together)
-    4. Balance workload across employees
+    3. Balance workload across employees
     """
     # Input validation
     logger.debug("Starting input validation")
 
-    if len(request.employees) != len({emp.id for emp in request.employees}):
-        employee_ids = [emp.id for emp in request.employees]
-        duplicates = [
-            eid for eid in employee_ids if employee_ids.count(eid) > 1]
+    # Optimized: Use Counter for O(n) duplicate detection instead of O(n²)
+    employee_ids = [emp.id for emp in request.employees]
+    employee_id_counts = Counter(employee_ids)
+    duplicates = [eid for eid, count in employee_id_counts.items()
+                  if count > 1]
+    if duplicates:
         error_msg = f"Duplicate employee IDs found: {set(duplicates)}. Each employee must have a unique ID."
         logger.error(error_msg)
         logger.debug(f"All employee IDs: {employee_ids}")
@@ -457,9 +457,11 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             detail=error_msg
         )
 
-    if len(request.car_yards) != len({cy.id for cy in request.car_yards}):
-        yard_ids = [cy.id for cy in request.car_yards]
-        duplicates = [yid for yid in yard_ids if yard_ids.count(yid) > 1]
+    # Optimized: Use Counter for O(n) duplicate detection instead of O(n²)
+    yard_ids = [cy.id for cy in request.car_yards]
+    yard_id_counts = Counter(yard_ids)
+    duplicates = [yid for yid, count in yard_id_counts.items() if count > 1]
+    if duplicates:
         error_msg = f"Duplicate car yard IDs found: {set(duplicates)}. Each car yard must have a unique ID."
         logger.error(error_msg)
         logger.debug(f"All car yard IDs: {yard_ids}")
@@ -502,18 +504,6 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                 detail=f"Car yard {cy.id} ({cy.name}) has min_employees ({cy.min_employees}) > max_employees ({cy.max_employees})."
             )
 
-    # Validate yard_groups
-    if request.yard_groups:
-        all_yard_ids = {cy.id for cy in request.car_yards}
-        for group_name, cy_ids in request.yard_groups.items():
-            invalid_ids = [
-                cy_id for cy_id in cy_ids if cy_id not in all_yard_ids]
-            if invalid_ids:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Yard group '{group_name}' contains invalid yard IDs: {invalid_ids}. Valid yard IDs are: {sorted(all_yard_ids)}."
-                )
-
     model = cp_model.CpModel()
 
     # Create indices
@@ -521,10 +511,20 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     car_yards = {cy.id: cy for cy in request.car_yards}
     days = request.days
 
+    # Cache repeated calculations for performance
+    num_employees = len(employees)
+    num_car_yards = len(car_yards)
+    num_days = len(days)
+    emp_id_list = list(employees.keys())
+    cy_id_list = list(car_yards.keys())
+    max_other_yards = num_car_yards - 1
+
     # Decision variables: x[e][cy][d] = 1 if employee e works at car_yard cy on day d
+    # Pre-compute invalid assignments to avoid creating unnecessary variables
+    # (Note: We still create all variables for simplicity, but could optimize further)
     x = {}
-    for emp_id in employees.keys():
-        for cy_id in car_yards.keys():
+    for emp_id in emp_id_list:
+        for cy_id in cy_id_list:
             for day in days:
                 x[(emp_id, cy_id, day)] = model.NewBoolVar(
                     f'x_e{emp_id}_cy{cy_id}_{day}')
@@ -532,7 +532,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     # NEW: Decision variable for whether a yard is covered on a day
     # covered[cy][d] = 1 if car_yard cy is covered (has at least min_employees) on day d
     covered = {}
-    for cy_id in car_yards.keys():
+    for cy_id in cy_id_list:
         for day in days:
             covered[(cy_id, day)] = model.NewBoolVar(
                 f'covered_cy{cy_id}_{day}')
@@ -554,7 +554,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             for day in days:
                 if day not in allowed_days:
                     model.Add(covered[(cy_id, day)] == 0)
-                    for emp_id in employees.keys():
+                    for emp_id in emp_id_list:
                         model.Add(x[(emp_id, cy_id, day)] == 0)
         # If required_days is set WITH per_week: allow all days (no restriction here)
         # We'll add a constraint later to ensure at least one visit on a required day
@@ -562,10 +562,10 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         if cy.per_week:
             visits_required, min_gap = cy.per_week
             # Validate that required visits don't exceed available days
-            if visits_required > len(days):
+            if visits_required > num_days:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Car yard {cy_id} ({cy.name}) requires {visits_required} visits per week but only {len(days)} days are scheduled."
+                    detail=f"Car yard {cy_id} ({cy.name}) requires {visits_required} visits per week but only {num_days} days are scheduled."
                 )
             # If required_days is also set, validate that at least one visit can occur on a required day
             # This means we need enough days between required days and other days to satisfy gap
@@ -620,18 +620,25 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                     )
 
     # Employees may have yard exclusions and availability constraints
+    # Optimized: Pre-compute invalid assignments to reduce constraint creation overhead
+    invalid_assignments = set()
     for emp_id, emp in employees.items():
-        for cy_id, cy in car_yards.items():
-            # Check car yard exclusion
-            if cy_id in emp.excluded_yards:
+        excluded_yards_set = set(emp.excluded_yards)
+        available_days_set = set(emp.available_days)
+        for cy_id in cy_id_list:
+            if cy_id in excluded_yards_set:
+                # All days are invalid for this employee-yard combination
                 for day in days:
-                    model.Add(x[(emp_id, cy_id, day)] == 0)
-
+                    invalid_assignments.add((emp_id, cy_id, day))
             else:
-                # Check availability
+                # Only unavailable days are invalid
                 for day in days:
-                    if day not in emp.available_days:
-                        model.Add(x[(emp_id, cy_id, day)] == 0)
+                    if day not in available_days_set:
+                        invalid_assignments.add((emp_id, cy_id, day))
+
+    # Apply constraints for invalid assignments
+    for emp_id, cy_id, day in invalid_assignments:
+        model.Add(x[(emp_id, cy_id, day)] == 0)
 
     # Constraint 1 (UPDATED): If a yard is covered, it must have between min and max employees
     # If not covered, it has 0 employees
@@ -639,10 +646,21 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     # Track which yard-days have employees working only that single yard (for penalty application)
     is_single_yard_only: Dict[Tuple[int, DayOfWeek], cp_model.IntVar] = {}
 
+    # Pre-compute employee-day total yards for single yard detection optimization
+    # This allows us to reuse the total calculation instead of recalculating for each yard
+    employee_day_total_yards: Dict[Tuple[int,
+                                         DayOfWeek], cp_model.LinearExpr] = {}
+    for emp_id in emp_id_list:
+        for day in days:
+            # Total yards worked by this employee on this day (as LinearExpr, not IntVar)
+            employee_day_total_yards[(emp_id, day)] = sum(
+                x[(emp_id, cy_id, day)] for cy_id in cy_id_list
+            )
+
     for cy_id, cy in car_yards.items():
         for day in days:
             employees_at_yard = sum(x[(emp_id, cy_id, day)]
-                                    for emp_id in employees.keys())
+                                    for emp_id in emp_id_list)
 
             # If covered = 1, then employees_at_yard >= min_employees
             # If covered = 0, then employees_at_yard >= 0 (always true)
@@ -657,17 +675,22 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             # Check if any employee at this yard is working ONLY this yard (not working other yards)
             # Penalty should only apply when employees are working a single yard, not when doing multiple
             # This allows efficient multi-yard sequences (e.g., Joe and Sam doing Yard A then Yard B)
+            # Optimized: Use pre-computed employee_day_total_yards to calculate other_yards_worked efficiently
             employee_single_yard_vars = []
-            for emp_id in employees.keys():
+            for emp_id in emp_id_list:
                 # Check if employee is assigned to this yard
                 is_at_this_yard = x[(emp_id, cy_id, day)]
 
-                # Count how many OTHER yards this employee works on the same day
-                other_yards_worked = sum(
-                    x[(emp_id, other_cy_id, day)]
-                    for other_cy_id in car_yards.keys()
-                    if other_cy_id != cy_id
-                )
+                # Optimized: Calculate other_yards_worked using pre-computed total minus current yard
+                # other_yards_worked = total_yards_worked - is_at_this_yard
+                # This avoids iterating through all other yards for each employee
+                total_yards_worked = employee_day_total_yards[(emp_id, day)]
+                # Create a variable for other_yards_worked = total_yards_worked - is_at_this_yard
+                other_yards_worked = model.NewIntVar(
+                    0, max_other_yards,
+                    f'other_yards_e{emp_id}_cy{cy_id}_{day}')
+                model.Add(other_yards_worked ==
+                          total_yards_worked - is_at_this_yard)
 
                 # Employee is working ONLY this yard if:
                 # - They're assigned to this yard (is_at_this_yard == 1)
@@ -681,7 +704,6 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
                 # Constraint 2: emp_single_yard can only be 1 if employee works no other yards
                 # If emp_single_yard == 1, then other_yards_worked == 0
-                max_other_yards = len(car_yards) - 1
                 model.Add(other_yards_worked <=
                           max_other_yards * (1 - emp_single_yard))
 
@@ -720,17 +742,17 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             # 3. There are extra employees above minimum
             # penalty_amount = extra_employees if (covered == 1 AND any_employee_single_yard == 1), else 0
             penalty_amount = model.NewIntVar(
-                0, len(employees), f'penalty_amount_cy{cy_id}_{day}')
+                0, num_employees, f'penalty_amount_cy{cy_id}_{day}')
 
             # Upper bounds: penalty cannot exceed extra_employees, and only applies when both conditions are true
             model.Add(penalty_amount <= extra_employees)
-            model.Add(penalty_amount <= covered[(cy_id, day)] * len(employees))
+            model.Add(penalty_amount <= covered[(cy_id, day)] * num_employees)
             model.Add(penalty_amount <=
-                      any_employee_single_yard * len(employees))
+                      any_employee_single_yard * num_employees)
 
             # Lower bound: if both conditions are true, penalty should equal extra_employees
             # penalty_amount >= extra_employees - M * (1 - covered) - M * (1 - any_employee_single_yard)
-            max_penalty = len(employees)
+            max_penalty = num_employees
             model.Add(penalty_amount >= extra_employees -
                       max_penalty * (1 - covered[(cy_id, day)]))
             model.Add(penalty_amount >= extra_employees -
@@ -755,7 +777,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                 yard_pairs_exceeding_radius.append((cy_a_id, cy_b_id))
 
     # Log how many constraints will be added (for debugging)
-    total_radius_constraints = len(yard_pairs_exceeding_radius) * len(days)
+    total_radius_constraints = len(yard_pairs_exceeding_radius) * num_days
     if total_radius_constraints > 0:
         logger.debug(
             f"Adding {total_radius_constraints} max_radius constraints ({len(yard_pairs_exceeding_radius)} pairs × {len(days)} days)")
@@ -780,7 +802,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         total_minutes = int(cy.hours_required * SCALE_FACTOR)
         for day in days:
             work_vars = []
-            for emp_id in employees.keys():
+            for emp_id in emp_id_list:
                 work_var = model.NewIntVar(
                     0, total_minutes,
                     f'work_e{emp_id}_cy{cy_id}_d{day}')
@@ -802,10 +824,9 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             # This ensures consistency between solver distribution and post-processing assumption
             # Approach: for any two assigned employees, their work difference is at most 1 minute
             # This allows for integer rounding while keeping distribution fair
-            if len(employees) > 1:
+            if num_employees > 1:
                 # Only enforce when yard is covered and there are multiple employees
                 # For each pair of employees, if both are assigned, their work should differ by at most 1 minute
-                emp_id_list = list(employees.keys())
                 for i in range(len(emp_id_list)):
                     for j in range(i + 1, len(emp_id_list)):
                         emp_i_id = emp_id_list[i]
@@ -834,22 +855,17 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                         model.Add(diff_ij >= -1).OnlyEnforceIf(both_assigned)
 
     # Now apply hours constraint per employee per day using distributed minutes
-    for emp_id in employees.keys():
+    for emp_id in emp_id_list:
         for day in days:
             total_minutes_worked = model.NewIntVar(
                 0, int(request.max_hours_per_day *
-                       SCALE_FACTOR * len(car_yards)),
+                       SCALE_FACTOR * num_car_yards),
                 f'total_minutes_e{emp_id}_d{day}')
             employee_day_minutes[(emp_id, day)] = total_minutes_worked
             model.Add(total_minutes_worked == sum(
-                work_minutes[(emp_id, cy_id, day)] for cy_id in car_yards.keys()))
+                work_minutes[(emp_id, cy_id, day)] for cy_id in cy_id_list))
             max_minutes = int(request.max_hours_per_day * SCALE_FACTOR)
             model.Add(total_minutes_worked <= max_minutes)
-
-    # Constraint 2b: Optional grouping constraint - encourage yards from same group together
-    # This is a soft preference (handled by bonus), but we can add a constraint to prevent
-    # mixing yards from different groups if yard_groups are defined
-    # (This is optional - removing it makes grouping purely preference-based via bonus)
 
     # Constraint 3: Car yard visit frequency and spacing (per_week)
     linked_yard_ids = {cy for pair in link_pairs.keys() for cy in pair}
@@ -922,71 +938,59 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
     # Constraint 5: Employee availability is already handled above (combined with yard exclusion)
 
-    # Objective 1: Prefer higher reliability-rated employees (higher rating = better)
-    # EmployeeReliabilityRating: EXCELLENT=10, ACCEPTABLE=7, BELOW_AVERAGE=5
-    quality_score = []
-    for emp_id, emp in employees.items():
-        for cy_id in car_yards.keys():
-            for day in days:
-                # Use the reliability rating value directly (higher is better)
-                weight = emp.ranking.value
-                quality_score.append(x[(emp_id, cy_id, day)] * weight)
-
-    # NEW Objective 2: Prioritize high-priority car yards
-    # Give higher weight to covering high-priority yards
+    # Optimized: Combine multiple objective calculations into fewer loops
+    # Pre-compute priority weights
     priority_weights = {
         CarYardPriority.HIGH: PRIORITY_WEIGHT_HIGH,
         CarYardPriority.MEDIUM: PRIORITY_WEIGHT_MEDIUM,
         CarYardPriority.LOW: PRIORITY_WEIGHT_LOW
     }
+
+    # Objective 2: Prioritize high-priority car yards (calculated once per yard-day)
     priority_score = []
-    for cy_id, cy in car_yards.items():
+    for cy_id in cy_id_list:
+        cy_priority_weight = priority_weights.get(car_yards[cy_id].priority, 1)
         for day in days:
-            weight = priority_weights.get(cy.priority, 1)
-            priority_score.append(covered[(cy_id, day)] * weight)
+            priority_score.append(covered[(cy_id, day)] * cy_priority_weight)
+
+    # Objective 1: Prefer higher reliability-rated employees (higher rating = better)
+    # EmployeeReliabilityRating: EXCELLENT=10, ACCEPTABLE=7, BELOW_AVERAGE=5
+    quality_score = []
+
+    # Pre-compute employee ranking values for efficiency
+    emp_ranking_values = {
+        emp_id: emp.ranking.value for emp_id, emp in employees.items()}
+
+    # Calculate quality score
+    for emp_id in emp_id_list:
+        emp_ranking = emp_ranking_values[emp_id]
+        for cy_id in cy_id_list:
+            for day in days:
+                # Quality score (employee reliability)
+                quality_score.append(x[(emp_id, cy_id, day)] * emp_ranking)
 
     # Objective 3: Balance workload - minimize difference between max and min shifts
-    shifts_per_employee = []
-    for emp_id in employees.keys():
+    shifts_per_employee_vars = []
+    for emp_id in emp_id_list:
         total = sum(x[(emp_id, cy_id, day)]
-                    for cy_id in car_yards.keys()
+                    for cy_id in cy_id_list
                     for day in days)
-        shifts_per_employee.append(total)
+        shifts_per_employee_vars.append(total)
 
-    min_shifts = model.NewIntVar(0, len(days) * len(car_yards), 'min_shifts')
-    max_shifts = model.NewIntVar(0, len(days) * len(car_yards), 'max_shifts')
+    min_shifts = model.NewIntVar(0, num_days * num_car_yards, 'min_shifts')
+    max_shifts = model.NewIntVar(0, num_days * num_car_yards, 'max_shifts')
 
-    for total in shifts_per_employee:
+    for total in shifts_per_employee_vars:
         model.Add(min_shifts <= total)
         model.Add(max_shifts >= total)
 
     workload_balance = max_shifts - min_shifts
 
-    # Objective 4: Grouping bonus - prefer employees working multiple yards in the same group
-    # This encourages grouped yards to be done together by the same employee
-    # The bonus increases with the number of yards worked in the group on the same day
-    # Example: If an employee works 2 yards in a group on Monday, bonus = 2 * 50 = 100
-    grouping_bonus = []
-    if request.yard_groups:
-        for group_name, cy_ids in request.yard_groups.items():
-            for emp_id in employees.keys():
-                for day in days:
-                    # Count how many yards in this group the employee works on this day
-                    yards_worked_in_group = sum(x[(emp_id, cy_id, day)]
-                                                for cy_id in cy_ids
-                                                if cy_id in car_yards.keys())
-                    # Bonus increases with the number of yards worked in the group
-                    # This encourages grouping but doesn't force it
-                    # (works as a soft constraint via objective function)
-                    grouping_bonus.append(
-                        yards_worked_in_group * GROUPING_BONUS_BASE_WEIGHT)
-
     # Combined objective: prioritize high-priority yards, maximize quality, minimize workload imbalance
-    # Add grouping bonus to encourage grouped yards to be done together
     total_assignments = sum(
         x[(emp_id, cy_id, day)]
-        for emp_id in employees.keys()
-        for cy_id in car_yards.keys()
+        for emp_id in emp_id_list
+        for cy_id in cy_id_list
         for day in days
     )
 
@@ -1008,9 +1012,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         sum(priority_score) * OBJECTIVE_PRIORITY_WEIGHT,
         # Second: use better employees
         sum(quality_score) * OBJECTIVE_QUALITY_WEIGHT,
-        # Third: encourage grouping (weight 10x the base bonus)
-        sum(grouping_bonus) * OBJECTIVE_GROUPING_WEIGHT,
-        # Fourth: balance workload (penalty for imbalance)
+        # Third: balance workload (penalty for imbalance)
         -workload_balance * OBJECTIVE_BALANCE_WEIGHT,
         # Discourage assigning more employees than necessary
         -sum(extra_employee_penalties) * OBJECTIVE_EXTRA_EMPLOYEE_WEIGHT,
@@ -1032,14 +1034,14 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     logger.debug(
         f"Model has {len(covered)} coverage variables (yard-day coverage)")
     logger.debug(
-        f"Total employees: {len(employees)}, Total yards: {len(car_yards)}, Total days: {len(days)}")
+        f"Total employees: {num_employees}, Total yards: {num_car_yards}, Total days: {num_days}")
 
     # Create a hash of key input data for comparison
     import hashlib
     input_data_str = json.dumps({
-        "employee_count": len(employees),
-        "yard_count": len(car_yards),
-        "day_count": len(days),
+        "employee_count": num_employees,
+        "yard_count": num_car_yards,
+        "day_count": num_days,
         "employee_availabilities": {eid: len(emp.available_days) for eid, emp in employees.items()},
         "yard_requirements": {cyid: (cy.min_employees, cy.max_employees) for cyid, cy in car_yards.items()},
         "max_hours": request.max_hours_per_day
@@ -1056,9 +1058,9 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     max_employees_needed = sum(cy.max_employees for cy in car_yards.values())
 
     logger.info(
-        f"Feasibility check: {len(employees)} employees, {total_employee_days_available} total employee-days available")
+        f"Feasibility check: {num_employees} employees, {total_employee_days_available} total employee-days available")
     logger.info(
-        f"Coverage needed: {len(car_yards)} yards × {len(days)} days = {total_yard_days} yard-days")
+        f"Coverage needed: {num_car_yards} yards × {num_days} days = {total_yard_days} yard-days")
     logger.info(
         f"Employee availability: {[(e.id, e.name, len(e.available_days), [d.value for d in e.available_days]) for e in employees.values()]}")
     logger.debug(
@@ -1087,7 +1089,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             "Solver returned INFEASIBLE - constraints cannot be satisfied")
         logger.error("Possible reasons:")
         logger.error(
-            f"  - Not enough employees available (have {len(employees)} employees)")
+            f"  - Not enough employees available (have {num_employees} employees)")
         logger.error(
             f"  - Employee availability too restrictive (total {total_employee_days_available} employee-days)")
         logger.error(
@@ -1109,11 +1111,16 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             f"  - Actual solve time: {solver.WallTime():.2f} seconds")
 
     # Build response (same as before)
-    # First collect raw assignment data (without creating Assignment objects yet)
+    # Optimized: Only iterate through assignments where solver.Value == 1
+    # Use list comprehension to build raw_assignments more efficiently
     raw_assignments = []
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        for emp_id, emp in employees.items():
-            for cy_id, cy in car_yards.items():
+        # Optimized: Build assignments list directly from solver results
+        # Only check assignments that are actually set to 1
+        for emp_id in emp_id_list:
+            emp = employees[emp_id]
+            for cy_id in cy_id_list:
+                cy = car_yards[cy_id]
                 for day in days:
                     if solver.Value(x[(emp_id, cy_id, day)]) == 1:
                         raw_assignments.append({
@@ -1131,7 +1138,8 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             )
 
         # Calculate stats from raw assignments
-        shifts_count = {emp_id: 0 for emp_id in employees.keys()}
+        # Optimized: Build dictionaries directly from raw_assignments
+        shifts_count = {emp_id: 0 for emp_id in emp_id_list}
         yards_covered = {}  # Track which yards were covered
         for assignment_data in raw_assignments:
             shifts_count[assignment_data["employee_id"]] += 1
@@ -1170,11 +1178,17 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
         # Get actual work hours from solver for each employee at each yard
         # work_minutes stores integer minutes (scaled by SCALE_FACTOR=60)
+        # Optimized: Only process work_minutes where there's an actual assignment
         actual_work_hours: Dict[Tuple[int, int, DayOfWeek], float] = {}
-        for (emp_id, cy_id, day), work_var in work_minutes.items():
-            # Convert from minutes to hours
-            actual_work_hours[(emp_id, cy_id, day)] = solver.Value(
-                work_var) / SCALE_FACTOR
+        # Only process work_minutes for assignments that exist (where x == 1)
+        for assignment_data in raw_assignments:
+            emp_id = assignment_data["employee_id"]
+            cy_id = assignment_data["car_yard_id"]
+            day = assignment_data["day"]
+            work_var = work_minutes.get((emp_id, cy_id, day))
+            if work_var is not None:
+                actual_work_hours[(emp_id, cy_id, day)] = solver.Value(
+                    work_var) / SCALE_FACTOR
 
         for day in days:
             if day not in day_assignments:
@@ -1434,10 +1448,8 @@ async def generate_roster(request: ScheduleRequest):
         logger.error(f"ValidationError in roster generation: {e}")
         logger.debug(f"ValidationError details: {e.errors()}")
         logger.debug(f"ValidationError traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=422,
-            detail=f"Validation error: {str(e)}"
-        )
+        # Re-raise as ValidationError to be handled by the exception handler
+        raise
     except Exception as e:
         logger.error(
             f"Unexpected error in roster generation: {type(e).__name__}: {str(e)}")

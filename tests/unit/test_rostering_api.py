@@ -685,19 +685,13 @@ def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, 
     Note: Uses original fixture values. The solver will automatically assign more employees
     to yards with high hours_required to keep each employee under max_hours_per_day.
     Example: A yard requiring 10 hours with 2 employees = 5 hours each (within limit).
-    """
-    # Group Reynella yards together (they're often done together)
-    # Note: Yard IDs 5 (Reynella Kia) and 6 (Reynella All) exist in sample_car_yards
-    # Yard ID 7 doesn't exist, so it's removed from the group
-    yard_groups = {
-        "reynella_group": [5, 6]  # Reynella Kia, Reynella All
-    }
 
+    Geographic grouping is handled by max_radius and north_south_position constraints.
+    """
     request = ScheduleRequest(
         employees=sample_employees,
         car_yards=sample_car_yards,
         days=sample_days,
-        yard_groups=yard_groups,
         max_hours_per_day=5.0,
         max_radius=1000
     )
@@ -1389,33 +1383,6 @@ def test_empty_days_list():
         "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 400
     assert "at least one day" in response.json()["detail"].lower()
-
-
-def test_invalid_yard_group_ids():
-    """Test that yard_groups with invalid yard IDs are rejected"""
-    request = ScheduleRequest(
-        employees=[
-            Employee(
-                id=1,
-                name="Alice",
-                ranking=EmployeeReliabilityRating.EXCELLENT,
-                available_days=[DayOfWeek.MONDAY],
-                max_radius=1000
-            )
-        ],
-        car_yards=[
-            CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, north_south_position=50)
-        ],
-        days=[DayOfWeek.MONDAY],
-        yard_groups={"group1": [999]}  # Invalid yard ID
-    )
-
-    response = client.post(
-        "/api/v1/roster", json=request.model_dump(mode="json"))
-    assert response.status_code == 400
-    detail = response.json()["detail"].lower()
-    assert "invalid yard" in detail or "yard group" in detail
 
 
 def test_per_week_exceeds_available_days():
