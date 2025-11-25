@@ -8,7 +8,6 @@ from src.scheduler.rostering_api import (
     CarYard,
     ScheduleRequest,
     CarYardPriority,
-    CarYardRegion,
     EmployeeReliabilityRating,
     solve_roster,
 )
@@ -51,7 +50,8 @@ def test_basic_roster_generation(sample_employees, sample_car_yards, sample_days
     request = ScheduleRequest(
         employees=sample_employees,
         car_yards=sample_car_yards,
-        days=sample_days
+        days=sample_days,
+        max_radius=1000  # Large radius for test fixtures
     )
 
     response = client.post(
@@ -92,7 +92,8 @@ def test_employee_availability_constraint(sample_employees, sample_car_yards):
         id=99,
         name="Limited",
         ranking=EmployeeReliabilityRating.EXCELLENT,
-        available_days=[DayOfWeek.MONDAY]
+        available_days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     # Use fewer car yards to make it feasible
@@ -101,7 +102,8 @@ def test_employee_availability_constraint(sample_employees, sample_car_yards):
     request = ScheduleRequest(
         employees=[limited_employee] + sample_employees[:2],
         car_yards=feasible_yards,
-        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -128,9 +130,10 @@ def test_impossible_constraint():
         ],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL)
+                    min_employees=1, max_employees=1, north_south_position=50)
         ],
-        days=[DayOfWeek.TUESDAY]  # Need Tuesday but no one available
+        days=[DayOfWeek.TUESDAY],  # Need Tuesday but no one available
+        max_radius=1000
     )
 
     response = client.post(
@@ -162,8 +165,9 @@ def test_ranking_preference():
     request = ScheduleRequest(
         employees=employees,
         car_yards=[CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                           min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL)],
-        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY]
+                           min_employees=1, max_employees=1, north_south_position=50)],
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -185,14 +189,16 @@ def test_one_employee_one_yard():
                 id=1,
                 name="Solo",
                 ranking=EmployeeReliabilityRating.EXCELLENT,
-                available_days=[DayOfWeek.MONDAY]
+                available_days=[DayOfWeek.MONDAY],
+                max_radius=1000
             )
         ],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL)
+                    min_employees=1, max_employees=1, north_south_position=50)
         ],
-        days=[DayOfWeek.MONDAY]
+        days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -224,9 +230,10 @@ def test_workload_balance():
         employees=employees,
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=2, max_employees=2, region=CarYardRegion.CENTRAL)
+                    min_employees=2, max_employees=2, north_south_position=50)
         ],
-        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY]
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -274,17 +281,18 @@ def test_priority_based_assignment():
     # With only 2 employees, we can't cover all yards every day
     car_yards = [
         CarYard(id=1, name="High Priority Yard", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, north_south_position=50),
         CarYard(id=2, name="Medium Priority Yard", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, north_south_position=50),
         CarYard(id=3, name="Low Priority Yard", priority=CarYardPriority.LOW,
-                min_employees=1, max_employees=2, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, north_south_position=50),
     ]
 
     request = ScheduleRequest(
         employees=employees,
         car_yards=car_yards,
-        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -333,11 +341,11 @@ def test_hours_constraint():
     # Total: 6 hours (exceeds 5 hour limit)
     car_yards = [
         CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, hours_required=2.0, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=2.0, north_south_position=50),
         CarYard(id=2, name="Yard B", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, hours_required=1.5, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=1.5, north_south_position=50),
         CarYard(id=3, name="Yard C", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, hours_required=2.5, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=2.5, north_south_position=50),
     ]
 
     employees = [
@@ -345,13 +353,15 @@ def test_hours_constraint():
             id=1,
             name="Employee 1",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=2,
             name="Employee 2",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         )
     ]
 
@@ -360,7 +370,8 @@ def test_hours_constraint():
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY],
-        max_hours_per_day=5.0
+        max_hours_per_day=5.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -383,9 +394,9 @@ def test_hours_constraint_multiple_yards_allowed():
     # Create yards that can fit together: 2.0 + 1.5 = 3.5 hours (within 5 hour limit)
     car_yards = [
         CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, hours_required=2.0, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=2.0, north_south_position=50),
         CarYard(id=2, name="Yard B", priority=CarYardPriority.MEDIUM,
-                min_employees=1, max_employees=2, hours_required=1.5, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=1.5, north_south_position=50),
     ]
 
     employees = [
@@ -401,7 +412,8 @@ def test_hours_constraint_multiple_yards_allowed():
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
-        max_hours_per_day=5.0
+        max_hours_per_day=5.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -419,11 +431,11 @@ def test_hours_constraint_with_default():
     # Create yards with varying hours
     car_yards = [
         CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, hours_required=2.0, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=2.0, north_south_position=50),
         CarYard(id=2, name="Yard B", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, hours_required=2.0, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=2.0, north_south_position=50),
         CarYard(id=3, name="Yard C", priority=CarYardPriority.HIGH,
-                min_employees=1, max_employees=2, hours_required=2.0, region=CarYardRegion.CENTRAL),
+                min_employees=1, max_employees=2, hours_required=2.0, north_south_position=50),
     ]
 
     employees = [
@@ -431,7 +443,8 @@ def test_hours_constraint_with_default():
             id=1,
             name="Employee 1",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         )
     ]
 
@@ -439,7 +452,8 @@ def test_hours_constraint_with_default():
     request = ScheduleRequest(
         employees=employees,
         car_yards=car_yards,
-        days=[DayOfWeek.MONDAY]
+        days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -459,7 +473,8 @@ def test_start_times_respect_yard_overrides_and_buffer():
             id=1,
             name="Employee 1",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         )
     ]
 
@@ -471,7 +486,7 @@ def test_start_times_respect_yard_overrides_and_buffer():
             min_employees=1,
             max_employees=1,
             hours_required=1.0,
-            region=CarYardRegion.CENTRAL
+            north_south_position=50
         ),
         CarYard(
             id=2,
@@ -480,7 +495,7 @@ def test_start_times_respect_yard_overrides_and_buffer():
             min_employees=1,
             max_employees=1,
             hours_required=1.0,
-            region=CarYardRegion.CENTRAL,
+            north_south_position=50,
             startTime=time(hour=8, minute=30)
         ),
     ]
@@ -489,7 +504,8 @@ def test_start_times_respect_yard_overrides_and_buffer():
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY],
-        travel_buffer_minutes=30
+        travel_buffer_minutes=30,
+        max_radius=1000
     )
 
     response = client.post("/api/v1/roster",
@@ -527,7 +543,8 @@ def test_travel_buffer_enforced_between_consecutive_yards():
             id=1,
             name="Employee 1",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         )
     ]
 
@@ -539,7 +556,7 @@ def test_travel_buffer_enforced_between_consecutive_yards():
             min_employees=1,
             max_employees=1,
             hours_required=1.0,
-            region=CarYardRegion.CENTRAL
+            north_south_position=50
         ),
         CarYard(
             id=2,
@@ -548,7 +565,7 @@ def test_travel_buffer_enforced_between_consecutive_yards():
             min_employees=1,
             max_employees=1,
             hours_required=1.0,
-            region=CarYardRegion.CENTRAL
+            north_south_position=50
         ),
     ]
 
@@ -557,7 +574,8 @@ def test_travel_buffer_enforced_between_consecutive_yards():
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY],
-        travel_buffer_minutes=travel_buffer
+        travel_buffer_minutes=travel_buffer,
+        max_radius=1000
     )
 
     response = client.post("/api/v1/roster",
@@ -591,19 +609,22 @@ def test_crews_stay_intact_between_consecutive_yards():
             id=1,
             name="Employee 1",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=2,
             name="Employee 2",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=3,
             name="Employee 3",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
     ]
 
@@ -615,7 +636,7 @@ def test_crews_stay_intact_between_consecutive_yards():
             min_employees=2,
             max_employees=2,
             hours_required=2.0,
-            region=CarYardRegion.CENTRAL
+            north_south_position=50
         ),
         CarYard(
             id=2,
@@ -624,7 +645,7 @@ def test_crews_stay_intact_between_consecutive_yards():
             min_employees=2,
             max_employees=2,
             hours_required=2.0,
-            region=CarYardRegion.CENTRAL,
+            north_south_position=50,
             startTime=time(hour=10, minute=0)
         ),
     ]
@@ -633,7 +654,8 @@ def test_crews_stay_intact_between_consecutive_yards():
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY],
-        travel_buffer_minutes=30
+        travel_buffer_minutes=30,
+        max_radius=1000
     )
 
     response = client.post("/api/v1/roster",
@@ -676,7 +698,8 @@ def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, 
         car_yards=sample_car_yards,
         days=sample_days,
         yard_groups=yard_groups,
-        max_hours_per_day=5.0
+        max_hours_per_day=5.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -884,44 +907,58 @@ def test_realistic_schedule_readable_format(sample_employees, sample_car_yards, 
     return schedule_list
 
 
-def test_region_exclusion():
+def test_excluded_yards():
+    """Test that employees with excluded_yards cannot be assigned to those yards"""
     employees = [
         Employee(
             id=1,
-            name="North Only",
+            name="Excluded Yard Employee",
             ranking=EmployeeReliabilityRating.EXCELLENT,
             available_days=[DayOfWeek.MONDAY],
-            not_region=CarYardRegion.SOUTH
+            excluded_yards=[50]  # Cannot work at yard 50
         ),
         Employee(
             id=2,
             name="Flexible",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         )
     ]
 
     car_yards = [
-        CarYard(id=50, name="Southern Yard", priority=CarYardPriority.MEDIUM,
+        CarYard(id=50, name="Excluded Yard", priority=CarYardPriority.MEDIUM,
                 min_employees=1, max_employees=1, hours_required=4.0,
-                region=CarYardRegion.SOUTH)
+                north_south_position=100)
     ]
 
     request = ScheduleRequest(
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY],
-        max_hours_per_day=5.0
+        max_hours_per_day=5.0,
+        max_radius=1000  # Large radius, not a constraint here
     )
 
     response = client.post(
         "/api/v1/roster", json=request.model_dump(mode="json"))
     assert response.status_code == 200
     data = response.json()
-    assigned = {assignment["employee_id"]
-                for assignment in data["assignments"]}
-    assert 1 not in assigned
-    assert 2 in assigned
+
+    # Employee 1 should not be assigned to yard 50
+    assignments = data["assignments"]
+    employee_1_assignments = [
+        a for a in assignments if a["employee_id"] == 1 and a["car_yard_id"] == 50
+    ]
+    assert len(
+        employee_1_assignments) == 0, "Employee 1 should not be assigned to excluded yard 50"
+
+    # Employee 2 should be assigned to yard 50
+    employee_2_assignments = [
+        a for a in assignments if a["employee_id"] == 2 and a["car_yard_id"] == 50
+    ]
+    assert len(
+        employee_2_assignments) > 0, "Employee 2 should be assigned to yard 50"
 
 
 def test_required_days_constraint():
@@ -943,7 +980,7 @@ def test_required_days_constraint():
     car_yards = [
         CarYard(id=60, name="Thursday Yard", priority=CarYardPriority.HIGH,
                 min_employees=2, max_employees=2, hours_required=4.0,
-                region=CarYardRegion.CENTRAL,
+                north_south_position=50,
                 required_days=[DayOfWeek.THURSDAY])
     ]
 
@@ -951,7 +988,8 @@ def test_required_days_constraint():
         employees=employees,
         car_yards=car_yards,
         days=list(DayOfWeek)[:5],
-        max_hours_per_day=6.0
+        max_hours_per_day=6.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -981,7 +1019,7 @@ def test_per_week_gap_constraint():
     car_yards = [
         CarYard(id=70, name="Biweekly Yard", priority=CarYardPriority.MEDIUM,
                 min_employees=1, max_employees=2, hours_required=4.0,
-                region=CarYardRegion.CENTRAL,
+                north_south_position=50,
                 per_week=(2, 2))
     ]
 
@@ -998,7 +1036,8 @@ def test_per_week_gap_constraint():
         employees=employees,
         car_yards=car_yards,
         days=schedule_days,
-        max_hours_per_day=6.0
+        max_hours_per_day=6.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -1040,11 +1079,11 @@ def test_linked_yard_gap_constraint():
     car_yards = [
         CarYard(id=80, name="Primary Yard", priority=CarYardPriority.HIGH,
                 min_employees=2, max_employees=3, hours_required=6.0,
-                region=CarYardRegion.CENTRAL,
+                north_south_position=50,
                 linked_yard=(81, 2)),
         CarYard(id=81, name="Linked Yard", priority=CarYardPriority.MEDIUM,
                 min_employees=1, max_employees=2, hours_required=3.0,
-                region=CarYardRegion.CENTRAL)
+                north_south_position=50)
     ]
 
     schedule_days = [
@@ -1060,7 +1099,8 @@ def test_linked_yard_gap_constraint():
         employees=employees,
         car_yards=car_yards,
         days=schedule_days,
-        max_hours_per_day=7.0
+        max_hours_per_day=7.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -1099,19 +1139,22 @@ def test_multiple_workers_divide_hours_equally():
             id=1,
             name="Worker 1",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=2,
             name="Worker 2",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=3,
             name="Worker 3",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
     ]
 
@@ -1122,7 +1165,7 @@ def test_multiple_workers_divide_hours_equally():
             id=100,
             name="Test Yard",
             priority=CarYardPriority.HIGH,
-            region=CarYardRegion.CENTRAL,
+            north_south_position=50,
             min_employees=3,
             max_employees=3,
             hours_required=8.0
@@ -1133,7 +1176,8 @@ def test_multiple_workers_divide_hours_equally():
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY],
-        max_hours_per_day=7.0
+        max_hours_per_day=7.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -1197,13 +1241,15 @@ def test_duplicate_employee_ids():
             id=1,
             name="Alice",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=1,  # Duplicate ID
             name="Bob",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
     ]
 
@@ -1211,9 +1257,10 @@ def test_duplicate_employee_ids():
         employees=employees,
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL)
+                    min_employees=1, max_employees=1, north_south_position=50)
         ],
-        days=[DayOfWeek.MONDAY]
+        days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -1230,16 +1277,18 @@ def test_duplicate_car_yard_ids():
                 id=1,
                 name="Alice",
                 ranking=EmployeeReliabilityRating.EXCELLENT,
-                available_days=[DayOfWeek.MONDAY]
+                available_days=[DayOfWeek.MONDAY],
+                max_radius=1000
             )
         ],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL),
+                    min_employees=1, max_employees=1, north_south_position=50),
             CarYard(id=1, name="Yard B", priority=CarYardPriority.HIGH,  # Duplicate ID
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL),
+                    min_employees=1, max_employees=1, north_south_position=50),
         ],
-        days=[DayOfWeek.MONDAY]
+        days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -1256,15 +1305,17 @@ def test_min_greater_than_max_employees():
                 id=1,
                 name="Alice",
                 ranking=EmployeeReliabilityRating.EXCELLENT,
-                available_days=[DayOfWeek.MONDAY]
+                available_days=[DayOfWeek.MONDAY],
+                max_radius=1000
             )
         ],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
                     min_employees=5, max_employees=3,  # min > max
-                    region=CarYardRegion.CENTRAL)
+                    north_south_position=50)
         ],
-        days=[DayOfWeek.MONDAY]
+        days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -1280,9 +1331,10 @@ def test_empty_employees_list():
         employees=[],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL)
+                    min_employees=1, max_employees=1, north_south_position=50)
         ],
-        days=[DayOfWeek.MONDAY]
+        days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -1299,11 +1351,13 @@ def test_empty_car_yards_list():
                 id=1,
                 name="Alice",
                 ranking=EmployeeReliabilityRating.EXCELLENT,
-                available_days=[DayOfWeek.MONDAY]
+                available_days=[DayOfWeek.MONDAY],
+                max_radius=1000
             )
         ],
         car_yards=[],
-        days=[DayOfWeek.MONDAY]
+        days=[DayOfWeek.MONDAY],
+        max_radius=1000
     )
 
     response = client.post(
@@ -1320,12 +1374,13 @@ def test_empty_days_list():
                 id=1,
                 name="Alice",
                 ranking=EmployeeReliabilityRating.EXCELLENT,
-                available_days=[DayOfWeek.MONDAY]
+                available_days=[DayOfWeek.MONDAY],
+                max_radius=1000
             )
         ],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL)
+                    min_employees=1, max_employees=1, north_south_position=50)
         ],
         days=[]
     )
@@ -1344,12 +1399,13 @@ def test_invalid_yard_group_ids():
                 id=1,
                 name="Alice",
                 ranking=EmployeeReliabilityRating.EXCELLENT,
-                available_days=[DayOfWeek.MONDAY]
+                available_days=[DayOfWeek.MONDAY],
+                max_radius=1000
             )
         ],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL)
+                    min_employees=1, max_employees=1, north_south_position=50)
         ],
         days=[DayOfWeek.MONDAY],
         yard_groups={"group1": [999]}  # Invalid yard ID
@@ -1375,7 +1431,7 @@ def test_per_week_exceeds_available_days():
         ],
         car_yards=[
             CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
-                    min_employees=1, max_employees=1, region=CarYardRegion.CENTRAL,
+                    min_employees=1, max_employees=1, north_south_position=50,
                     per_week=(10, 0))  # 10 visits but only 2 days scheduled
         ],
         days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]  # Only 2 days
@@ -1395,19 +1451,22 @@ def test_work_distribution_consistency():
             id=1,
             name="Worker 1",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=2,
             name="Worker 2",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=3,
             name="Worker 3",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
     ]
 
@@ -1418,7 +1477,7 @@ def test_work_distribution_consistency():
             id=100,
             name="Test Yard",
             priority=CarYardPriority.HIGH,
-            region=CarYardRegion.CENTRAL,
+            north_south_position=50,
             min_employees=3,
             max_employees=3,
             hours_required=9.0
@@ -1429,7 +1488,8 @@ def test_work_distribution_consistency():
         employees=employees,
         car_yards=car_yards,
         days=[DayOfWeek.MONDAY],
-        max_hours_per_day=7.0
+        max_hours_per_day=7.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -1478,13 +1538,15 @@ def test_extra_employee_penalty_only_applies_to_single_yard_work():
             id=1,
             name="Joe",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
         Employee(
             id=2,
             name="Sam",
             ranking=EmployeeReliabilityRating.EXCELLENT,
-            available_days=[DayOfWeek.MONDAY]
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         ),
     ]
 
@@ -1498,7 +1560,7 @@ def test_extra_employee_penalty_only_applies_to_single_yard_work():
             min_employees=1,
             max_employees=2,
             hours_required=2.0,
-            region=CarYardRegion.CENTRAL
+            north_south_position=50
         ),
         CarYard(
             id=2,
@@ -1507,7 +1569,7 @@ def test_extra_employee_penalty_only_applies_to_single_yard_work():
             min_employees=1,
             max_employees=2,
             hours_required=2.0,
-            region=CarYardRegion.CENTRAL
+            north_south_position=50
         ),
     ]
 
@@ -1516,7 +1578,8 @@ def test_extra_employee_penalty_only_applies_to_single_yard_work():
         car_yards=car_yards_multi,
         days=[DayOfWeek.MONDAY],
         max_hours_per_day=7.0,
-        travel_buffer_minutes=30
+        travel_buffer_minutes=30,
+        max_radius=1000
     )
 
     response_multi = client.post(
@@ -1581,7 +1644,7 @@ def test_extra_employee_penalty_only_applies_to_single_yard_work():
             min_employees=1,
             max_employees=2,
             hours_required=3.0,
-            region=CarYardRegion.CENTRAL
+            north_south_position=50
         ),
     ]
 
@@ -1589,7 +1652,8 @@ def test_extra_employee_penalty_only_applies_to_single_yard_work():
         employees=employees,
         car_yards=car_yards_single,
         days=[DayOfWeek.MONDAY],
-        max_hours_per_day=7.0
+        max_hours_per_day=7.0,
+        max_radius=1000
     )
 
     response_single = client.post(
@@ -1720,10 +1784,11 @@ def test_per_week_with_required_days():
             min_employees=1,
             max_employees=2,
             hours_required=3.0,
-            region=CarYardRegion.CENTRAL,
+            north_south_position=50,
             per_week=(2, 2),  # 2 visits per week, at least 2 days apart
             # At least one visit must be on Monday
-            required_days=[DayOfWeek.MONDAY]
+            required_days=[DayOfWeek.MONDAY],
+            max_radius=1000
         )
     ]
 
@@ -1731,7 +1796,8 @@ def test_per_week_with_required_days():
         employees=employees,
         car_yards=car_yards,
         days=schedule_days,
-        max_hours_per_day=7.0
+        max_hours_per_day=7.0,
+        max_radius=1000
     )
 
     response = client.post(
@@ -1823,3 +1889,312 @@ def test_per_week_with_required_days():
     if gap_requirement >= 2:
         assert other_visit_day != DayOfWeek.TUESDAY, \
             f"The other visit cannot be on Tuesday if gap_requirement >= 2 (gap from Monday would be 1 day)"
+
+
+def test_max_radius_constraint():
+    """Test that yards too far apart (beyond max_radius) cannot be scheduled on the same day"""
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
+        ),
+        Employee(
+            id=2,
+            name="Employee 2",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
+        )
+    ]
+
+    # Create yards with positions: 0 (north), 50 (middle), 100 (south)
+    # max_radius = 30 means yards must be within 30 units of each other
+    car_yards = [
+        CarYard(id=1, name="North Yard", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0,
+                north_south_position=0),  # Position 0
+        CarYard(id=2, name="Middle Yard", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0,
+                north_south_position=50),  # Position 50
+        CarYard(id=3, name="South Yard", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0,
+                north_south_position=100)  # Position 100
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
+        max_hours_per_day=8.0,
+        max_radius=30  # Yards must be within 30 units of each other
+    )
+
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+    assignments = data["assignments"]
+
+    # Group assignments by day and yard
+    yards_by_day = {}
+    for assignment in assignments:
+        day = assignment["day"]
+        yard_id = assignment["car_yard_id"]
+        if day not in yards_by_day:
+            yards_by_day[day] = set()
+        yards_by_day[day].add(yard_id)
+
+    # Check that on each day, no two yards are more than 30 units apart
+    for day, yard_ids in yards_by_day.items():
+        if len(yard_ids) > 1:
+            yard_positions = {
+                cy.id: cy.north_south_position
+                for cy in car_yards
+                if cy.id in yard_ids
+            }
+            positions_list = list(yard_positions.values())
+            max_diff = max(positions_list) - min(positions_list)
+            assert max_diff <= request.max_radius, \
+                f"On {day}, yards {yard_ids} have positions {yard_positions}, " \
+                f"max difference {max_diff} exceeds max_radius {request.max_radius}"
+
+    # Verify that yards 0 and 100 (difference = 100) cannot be on the same day
+    # But yards 0 and 50 (difference = 50) also cannot be on same day with radius 30
+    # And yards 50 and 100 (difference = 50) also cannot be on same day with radius 30
+    # So each yard should be on a different day, or only one yard per day
+    if DEBUG:
+        print(f"\n✅ Test passed: Max radius constraint")
+        print(f"   Max radius: {request.max_radius}")
+        print(
+            f"   Yard positions: {[(cy.id, cy.north_south_position) for cy in car_yards]}")
+        for day, yard_ids in yards_by_day.items():
+            if yard_ids:
+                positions = [
+                    cy.north_south_position for cy in car_yards if cy.id in yard_ids]
+                max_diff = max(positions) - \
+                    min(positions) if len(positions) > 1 else 0
+                print(
+                    f"   {day}: yards {yard_ids}, max position diff: {max_diff}")
+
+
+def test_max_radius_allows_nearby_yards():
+    """Test that yards within max_radius can be scheduled together on the same day"""
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
+        ),
+        Employee(
+            id=2,
+            name="Employee 2",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
+        )
+    ]
+
+    # Create yards close together: positions 0, 10, 20 (all within radius 30)
+    car_yards = [
+        CarYard(id=1, name="Yard 1", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0,
+                north_south_position=0),
+        CarYard(id=2, name="Yard 2", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0,
+                north_south_position=10),
+        CarYard(id=3, name="Yard 3", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=2.0,
+                north_south_position=20)
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        max_hours_per_day=8.0,
+        max_radius=30  # All yards are within 30 units (max diff = 20)
+    )
+
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+    assignments = data["assignments"]
+
+    # All three yards should be able to be scheduled on Monday
+    # (though the solver may choose not to based on other constraints)
+    yards_scheduled = {assignment["car_yard_id"] for assignment in assignments}
+
+    # At least one yard should be scheduled
+    assert len(yards_scheduled) > 0, "At least one yard should be scheduled"
+
+    # If multiple yards are scheduled, verify they're within radius
+    if len(yards_scheduled) > 1:
+        scheduled_positions = [
+            cy.north_south_position
+            for cy in car_yards
+            if cy.id in yards_scheduled
+        ]
+        max_diff = max(scheduled_positions) - min(scheduled_positions)
+        assert max_diff <= request.max_radius, \
+            f"Yards {yards_scheduled} have max position difference {max_diff}, " \
+            f"which exceeds max_radius {request.max_radius}"
+
+    if DEBUG:
+        print(f"\n✅ Test passed: Nearby yards can be scheduled together")
+        print(f"   Max radius: {request.max_radius}")
+        print(f"   Yards scheduled: {yards_scheduled}")
+
+
+def test_multiple_excluded_yards():
+    """Test that employees can exclude multiple yards"""
+    employees = [
+        Employee(
+            id=1,
+            name="Employee with Multiple Exclusions",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY],
+            excluded_yards=[10, 20]  # Cannot work at yards 10 or 20
+        ),
+        Employee(
+            id=2,
+            name="Flexible Employee",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY],
+            max_radius=1000
+        )
+    ]
+
+    car_yards = [
+        CarYard(id=10, name="Excluded Yard 1", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=1, hours_required=2.0,
+                north_south_position=0),
+        CarYard(id=20, name="Excluded Yard 2", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=1, hours_required=2.0,
+                north_south_position=10),
+        CarYard(id=30, name="Allowed Yard", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=1, hours_required=2.0,
+                north_south_position=20)
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        max_hours_per_day=8.0,
+        max_radius=100  # Large radius, not a constraint
+    )
+
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+    assignments = data["assignments"]
+
+    # Employee 1 should not be assigned to yards 10 or 20
+    employee_1_assignments = [
+        a for a in assignments
+        if a["employee_id"] == 1 and a["car_yard_id"] in [10, 20]
+    ]
+    assert len(employee_1_assignments) == 0, \
+        f"Employee 1 should not be assigned to excluded yards 10 or 20. " \
+        f"Found assignments: {employee_1_assignments}"
+
+    # Employee 1 can be assigned to yard 30
+    employee_1_yard_30 = [
+        a for a in assignments
+        if a["employee_id"] == 1 and a["car_yard_id"] == 30
+    ]
+    # This is allowed, but not required (solver may choose employee 2)
+
+    # Employee 2 should be able to work at any yard
+    employee_2_assignments = [
+        a for a in assignments if a["employee_id"] == 2
+    ]
+    assert len(employee_2_assignments) > 0, \
+        "Employee 2 should be assigned to at least one yard"
+
+    if DEBUG:
+        print(f"\n✅ Test passed: Multiple excluded yards")
+        print(f"   Employee 1 excluded yards: [10, 20]")
+        print(
+            f"   Employee 1 assignments: {[a['car_yard_id'] for a in assignments if a['employee_id'] == 1]}")
+        print(
+            f"   Employee 2 assignments: {[a['car_yard_id'] for a in assignments if a['employee_id'] == 2]}")
+
+
+def test_north_south_position_ordering():
+    """Test that north_south_position is properly used in radius calculations"""
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
+        )
+    ]
+
+    # Create yards with specific positions to test radius constraint
+    # Position 0 (north), 25 (middle), 60 (south)
+    # With max_radius=30, yard 0 and 25 can be together (diff=25),
+    # but 0 and 60 cannot (diff=60), and 25 and 60 cannot (diff=35)
+    car_yards = [
+        CarYard(id=1, name="North", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=1, hours_required=2.0,
+                north_south_position=0),
+        CarYard(id=2, name="Middle", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=1, hours_required=2.0,
+                north_south_position=25),
+        CarYard(id=3, name="South", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=1, hours_required=2.0,
+                north_south_position=60)
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
+        max_hours_per_day=8.0,
+        max_radius=30
+    )
+
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    data = response.json()
+    assignments = data["assignments"]
+
+    # Group by day
+    yards_by_day = {}
+    for assignment in assignments:
+        day = assignment["day"]
+        yard_id = assignment["car_yard_id"]
+        if day not in yards_by_day:
+            yards_by_day[day] = set()
+        yards_by_day[day].add(yard_id)
+
+    # Verify radius constraint for each day
+    for day, yard_ids in yards_by_day.items():
+        if len(yard_ids) > 1:
+            positions = [
+                cy.north_south_position
+                for cy in car_yards
+                if cy.id in yard_ids
+            ]
+            max_diff = max(positions) - min(positions)
+            assert max_diff <= request.max_radius, \
+                f"On {day}, yards {yard_ids} have positions {positions}, " \
+                f"max difference {max_diff} exceeds max_radius {request.max_radius}"
+
+    if DEBUG:
+        print(f"\n✅ Test passed: North-south position ordering")
+        print(f"   Max radius: {request.max_radius}")
+        for day, yard_ids in yards_by_day.items():
+            if yard_ids:
+                positions = [
+                    cy.north_south_position for cy in car_yards if cy.id in yard_ids]
+                print(
+                    f"   {day}: yards {yard_ids}, positions {positions}, max diff: {max(positions) - min(positions) if len(positions) > 1 else 0}")

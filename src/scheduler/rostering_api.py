@@ -111,18 +111,12 @@ class CarYardPriority(str, Enum):
     LOW = "low"
 
 
-class CarYardRegion(str, Enum):
-    NORTH = "north"
-    CENTRAL = "central"
-    SOUTH = "south"
-
-
 class Employee(BaseModel):
     id: int
     name: str
     ranking: EmployeeReliabilityRating
     available_days: List[DayOfWeek]
-    not_region: Optional[CarYardRegion] = None
+    excluded_yards: List[int] = Field(default_factory=list)
 
 
 class CarYard(BaseModel):
@@ -130,7 +124,7 @@ class CarYard(BaseModel):
     name: str
     startTime: Optional[time] = None
     priority: CarYardPriority
-    region: CarYardRegion
+    north_south_position: int
     required_days: Optional[List[DayOfWeek]] = None
     # (linked yard id, minimum gap in days between visits to the yards)
     linked_yard: Optional[Tuple[int, int]] = None
@@ -162,6 +156,8 @@ class ScheduleRequest(BaseModel):
         ge=0,
         description="Minimum buffer between consecutive yards for the same day (travel time)."
     )
+    max_radius: int = Field(..., ge=0,
+                            description="Maximum position difference between yards that can be scheduled same day")
 
 
 class Assignment(BaseModel):
@@ -327,7 +323,7 @@ class ScheduleResponse(BaseModel):
 OBJECTIVE_PRIORITY_WEIGHT = 10000
 OBJECTIVE_QUALITY_WEIGHT = 10
 OBJECTIVE_GROUPING_WEIGHT = 10
-OBJECTIVE_BALANCE_WEIGHT = 50
+OBJECTIVE_BALANCE_WEIGHT = 100  # previously was set at 50
 OBJECTIVE_EXTRA_EMPLOYEE_WEIGHT = 2000
 OBJECTIVE_PARTIAL_OVERLAP_WEIGHT = 2000
 OBJECTIVE_ASSIGNMENT_PENALTY = 10
@@ -437,7 +433,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     - Each yard must have min-max employees if covered
     - Yards respect required days, visit counts, spacing rules, and linked-yard gaps
     - Employees can work multiple yards per day, limited by max_hours_per_day
-    - Employees can only work on available days and avoid excluded regions
+    - Employees can only work on available days and avoid excluded yards
     - Grouping bonus encourages yards in the same group to be done together
 
     Objectives (in priority order):
@@ -623,14 +619,14 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                         detail=f"Linked yard {yard_id} cannot require more than one visit per week."
                     )
 
-    # Employees may have region exclusions and availability constraints
-    # Combine both checks in a single loop for efficiency
+    # Employees may have yard exclusions and availability constraints
     for emp_id, emp in employees.items():
         for cy_id, cy in car_yards.items():
-            # Check region exclusion
-            if emp.not_region and cy.region == emp.not_region:
+            # Check car yard exclusion
+            if cy_id in emp.excluded_yards:
                 for day in days:
                     model.Add(x[(emp_id, cy_id, day)] == 0)
+
             else:
                 # Check availability
                 for day in days:
@@ -741,6 +737,39 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                       max_penalty * (1 - any_employee_single_yard))
 
             extra_employee_penalties.append(penalty_amount)
+
+    # Constraint: Yards scheduled on the same day must be within max_radius
+    # This prevents scheduling yards that are too far apart geographically
+    # Optimize by pre-computing which yard pairs exceed max_radius
+    yard_pairs_exceeding_radius = []
+    sorted_yard_ids = sorted(car_yards.keys())
+    for i in range(len(sorted_yard_ids)):
+        cy_a_id = sorted_yard_ids[i]
+        cy_a = car_yards[cy_a_id]
+        for j in range(i + 1, len(sorted_yard_ids)):
+            cy_b_id = sorted_yard_ids[j]
+            cy_b = car_yards[cy_b_id]
+            position_diff = abs(cy_a.north_south_position -
+                                cy_b.north_south_position)
+            if position_diff > request.max_radius:
+                yard_pairs_exceeding_radius.append((cy_a_id, cy_b_id))
+
+    # Log how many constraints will be added (for debugging)
+    total_radius_constraints = len(yard_pairs_exceeding_radius) * len(days)
+    if total_radius_constraints > 0:
+        logger.debug(
+            f"Adding {total_radius_constraints} max_radius constraints ({len(yard_pairs_exceeding_radius)} pairs × {len(days)} days)")
+
+    # Only add constraints for pairs that actually exceed the radius
+    for day in days:
+        for cy_a_id, cy_b_id in yard_pairs_exceeding_radius:
+            # Cannot schedule both yards on the same day
+            # If yard A is covered, then yard B cannot be covered on this day
+            # If yard B is covered, then yard A cannot be covered on this day
+            model.AddBoolOr([
+                covered[(cy_a_id, day)].Not(),
+                covered[(cy_b_id, day)].Not()
+            ])
 
     # Constraint 2: Limit total hours per employee per day
     # Distribute total yard hours across assigned employees while respecting per-employee limits
@@ -891,7 +920,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                         covered[(target_id, day_b)].Not()
                     ])
 
-    # Constraint 5: Employee availability is already handled above (combined with region exclusion)
+    # Constraint 5: Employee availability is already handled above (combined with yard exclusion)
 
     # Objective 1: Prefer higher reliability-rated employees (higher rating = better)
     # EmployeeReliabilityRating: EXCELLENT=10, ACCEPTABLE=7, BELOW_AVERAGE=5
@@ -1382,7 +1411,7 @@ async def generate_roster(request: ScheduleRequest):
         # Log request details at debug level
         logger.debug(
             f"Employees: {[{'id': e.id, 'name': e.name, 'ranking': e.ranking.value, 'available_days': [d.value for d in e.available_days]} for e in request.employees]}")
-        logger.debug(f"Car yards: {[{'id': cy.id, 'name': cy.name, 'priority': cy.priority.value, 'region': cy.region.value, 'min_employees': cy.min_employees, 'max_employees': cy.max_employees} for cy in request.car_yards]}")
+        logger.debug(f"Car yards: {[{'id': cy.id, 'name': cy.name, 'priority': cy.priority.value, 'north_south_position': cy.north_south_position, 'min_employees': cy.min_employees, 'max_employees': cy.max_employees} for cy in request.car_yards]}")
         logger.debug(f"Days: {[d.value for d in request.days]}")
         logger.debug(f"Max hours per day: {request.max_hours_per_day}")
         logger.debug(f"Travel buffer: {request.travel_buffer_minutes} minutes")
