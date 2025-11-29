@@ -494,15 +494,91 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             detail=error_msg
         )
 
-    logger.debug("Input validation passed")
+    # Comprehensive validation with explicit error messages
+    # Pre-compute all yard IDs for reference validation
+    all_yard_ids = {cy.id for cy in request.car_yards}
 
-    # Validate min <= max for each yard
-    for cy in request.car_yards:
+    # Validate employees
+    for idx, emp in enumerate(request.employees):
+        if not emp.name or not emp.name.strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Employee at index {idx} has an empty or missing name. Employee ID: {emp.id if hasattr(emp, 'id') else 'unknown'}"
+            )
+        if emp.id is None or emp.id < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Employee '{emp.name}' has invalid ID: {emp.id}. Employee ID must be a positive integer."
+            )
+        # Validate excluded_yards reference existing yards
+        if emp.excluded_yards:
+            invalid_yard_ids = [
+                yid for yid in emp.excluded_yards if yid not in all_yard_ids]
+            if invalid_yard_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Employee '{emp.name}' (ID: {emp.id}) has excluded_yards referencing non-existent yard IDs: {invalid_yard_ids}. Valid yard IDs are: {sorted(all_yard_ids)}"
+                )
+
+    # Validate car yards
+
+    for idx, cy in enumerate(request.car_yards):
+        if not cy.name or not cy.name.strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Car yard at index {idx} has an empty or missing name. Car yard ID: {cy.id if hasattr(cy, 'id') else 'unknown'}"
+            )
+        if cy.id is None or cy.id < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Car yard '{cy.name}' has invalid ID: {cy.id}. Car yard ID must be a positive integer."
+            )
+
+        # Validate min <= max employees
         if cy.min_employees > cy.max_employees:
             raise HTTPException(
                 status_code=400,
-                detail=f"Car yard {cy.id} ({cy.name}) has min_employees ({cy.min_employees}) > max_employees ({cy.max_employees})."
+                detail=f"Car yard '{cy.name}' (ID: {cy.id}) has min_employees ({cy.min_employees}) greater than max_employees ({cy.max_employees})."
             )
+
+        # Validate linked_yard references existing yard
+        if cy.linked_yard:
+            linked_yard_id, gap_days = cy.linked_yard
+            if linked_yard_id not in all_yard_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Car yard '{cy.name}' (ID: {cy.id}) has linked_yard referencing non-existent yard ID: {linked_yard_id}. Valid yard IDs are: {sorted(all_yard_ids)}"
+                )
+            if gap_days < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Car yard '{cy.name}' (ID: {cy.id}) has linked_yard with negative gap_days: {gap_days}. Gap must be non-negative."
+                )
+
+        # Validate required_days are in the schedule days
+        if cy.required_days:
+            schedule_days_set = set(request.days)
+            invalid_required_days = [
+                day for day in cy.required_days if day not in schedule_days_set]
+            if invalid_required_days:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Car yard '{cy.name}' (ID: {cy.id}) has required_days {[d.value for d in invalid_required_days]} that are not in the scheduled days {[d.value for d in request.days]}."
+                )
+
+    # Validate max_hours_per_day is reasonable (note: days list already validated earlier)
+    if request.max_hours_per_day < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_hours_per_day ({request.max_hours_per_day}) is too low. Minimum allowed is 3 hours."
+        )
+    if request.max_hours_per_day > 24:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_hours_per_day ({request.max_hours_per_day}) exceeds maximum of 24 hours per day."
+        )
+
+    logger.debug("Input validation passed")
 
     model = cp_model.CpModel()
 
@@ -675,47 +751,34 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             # Check if any employee at this yard is working ONLY this yard (not working other yards)
             # Penalty should only apply when employees are working a single yard, not when doing multiple
             # This allows efficient multi-yard sequences (e.g., Joe and Sam doing Yard A then Yard B)
-            # Optimized: Use pre-computed employee_day_total_yards to calculate other_yards_worked efficiently
+            # OPTIMIZED: Directly check if total_yards_worked == 1 without intermediate variable
             employee_single_yard_vars = []
             for emp_id in emp_id_list:
                 # Check if employee is assigned to this yard
                 is_at_this_yard = x[(emp_id, cy_id, day)]
 
-                # Optimized: Calculate other_yards_worked using pre-computed total minus current yard
-                # other_yards_worked = total_yards_worked - is_at_this_yard
-                # This avoids iterating through all other yards for each employee
+                # Use pre-computed total yards worked (already calculated once per employee per day)
                 total_yards_worked = employee_day_total_yards[(emp_id, day)]
-                # Create a variable for other_yards_worked = total_yards_worked - is_at_this_yard
-                other_yards_worked = model.NewIntVar(
-                    0, max_other_yards,
-                    f'other_yards_e{emp_id}_cy{cy_id}_{day}')
-                model.Add(other_yards_worked ==
-                          total_yards_worked - is_at_this_yard)
 
                 # Employee is working ONLY this yard if:
                 # - They're assigned to this yard (is_at_this_yard == 1)
-                # - AND they're not working any other yard (other_yards_worked == 0)
+                # - AND they work exactly 1 yard total (total_yards_worked == 1)
                 emp_single_yard = model.NewBoolVar(
                     f'emp_single_yard_e{emp_id}_cy{cy_id}_{day}')
 
-                # emp_single_yard == 1 if and only if (is_at_this_yard == 1 AND other_yards_worked == 0)
+                # emp_single_yard == 1 if and only if (is_at_this_yard == 1 AND total_yards_worked == 1)
                 # Constraint 1: emp_single_yard can only be 1 if employee is at this yard
                 model.Add(emp_single_yard <= is_at_this_yard)
 
-                # Constraint 2: emp_single_yard can only be 1 if employee works no other yards
-                # If emp_single_yard == 1, then other_yards_worked == 0
-                model.Add(other_yards_worked <=
-                          max_other_yards * (1 - emp_single_yard))
+                # Constraint 2: emp_single_yard can only be 1 if total_yards_worked <= 1
+                # If total_yards_worked >= 2, then emp_single_yard <= 0 (forces 0)
+                model.Add(emp_single_yard <= 2 - total_yards_worked)
 
-                # Constraint 3: If employee is at this yard and works no other yards, emp_single_yard must be 1
-                # We encode: if (is_at_this_yard == 1 AND other_yards_worked == 0), then emp_single_yard == 1
-                # Using: emp_single_yard >= is_at_this_yard - other_yards_worked
-                # This works because:
-                # - If is_at_this_yard == 0: emp_single_yard >= 0 - other_yards_worked (no constraint, but emp_single_yard <= 0 from constraint 1)
-                # - If is_at_this_yard == 1 and other_yards_worked == 0: emp_single_yard >= 1 (forces it to 1)
-                # - If is_at_this_yard == 1 and other_yards_worked >= 1: emp_single_yard >= 1 - 1 = 0 (allows 0, and constraint 2 prevents 1)
-                model.Add(emp_single_yard >=
-                          is_at_this_yard - other_yards_worked)
+                # Constraint 3: If employee is at this yard and total_yards_worked == 1, emp_single_yard must be 1
+                # Only enforce when is_at_this_yard == 1 to avoid contradictions
+                # When is_at_this_yard == 1 and total_yards_worked == 1: emp_single_yard >= 1 + 1 - 1 = 1 (forces it to 1)
+                model.Add(emp_single_yard >= is_at_this_yard + 1 -
+                          total_yards_worked).OnlyEnforceIf(is_at_this_yard)
 
                 employee_single_yard_vars.append(emp_single_yard)
 
@@ -819,40 +882,44 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             model.Add(total_work == 0).OnlyEnforceIf(
                 covered[(cy_id, day)].Not())
 
-            # Enforce approximately equal work distribution
+            # Enforce approximately equal work distribution (OPTIMIZED: O(n) instead of O(n²))
             # When a yard is covered, all assigned employees should work approximately the same amount
             # This ensures consistency between solver distribution and post-processing assumption
-            # Approach: for any two assigned employees, their work difference is at most 1 minute
+            # Approach: use min/max bounds instead of pairwise comparisons
+            # All assigned employees must be between min_work and max_work, with max_work - min_work <= 1
             # This allows for integer rounding while keeping distribution fair
             if num_employees > 1:
                 # Only enforce when yard is covered and there are multiple employees
-                # For each pair of employees, if both are assigned, their work should differ by at most 1 minute
-                for i in range(len(emp_id_list)):
-                    for j in range(i + 1, len(emp_id_list)):
-                        emp_i_id = emp_id_list[i]
-                        emp_j_id = emp_id_list[j]
-                        work_i = work_minutes[(emp_i_id, cy_id, day)]
-                        work_j = work_minutes[(emp_j_id, cy_id, day)]
+                # Create min and max work variables for this yard-day
+                min_work = model.NewIntVar(
+                    0, total_minutes, f'min_work_cy{cy_id}_d{day}')
+                max_work = model.NewIntVar(
+                    0, total_minutes, f'max_work_cy{cy_id}_d{day}')
 
-                        # If both employees are assigned, their work difference should be <= 1
-                        # This is enforced via: if both x[i] and x[j] are 1, then |work_i - work_j| <= 1
-                        # We use: work_i - work_j <= 1 when both assigned, and work_j - work_i <= 1 when both assigned
-                        diff_ij = model.NewIntVar(-total_minutes, total_minutes,
-                                                  f'diff_ij_e{emp_i_id}_e{emp_j_id}_cy{cy_id}_d{day}')
-                        model.Add(diff_ij == work_i - work_j)
+                # Always ensure min_work <= max_work
+                model.Add(min_work <= max_work)
 
-                        # When both are assigned, enforce |diff_ij| <= 1
-                        # both_assigned == 1 if and only if both x[i] and x[j] are 1
-                        both_assigned = model.NewBoolVar(
-                            f'both_e{emp_i_id}_e{emp_j_id}_cy{cy_id}_d{day}')
-                        model.Add(both_assigned <= x[(emp_i_id, cy_id, day)])
-                        model.Add(both_assigned <= x[(emp_j_id, cy_id, day)])
-                        model.Add(both_assigned >= x[(emp_i_id, cy_id, day)] +
-                                  x[(emp_j_id, cy_id, day)] - 1)
+                # When yard is covered, constrain the spread to be at most 1 minute
+                # This ensures all assigned employees work within 1 minute of each other
+                model.Add(max_work - min_work <=
+                          1).OnlyEnforceIf(covered[(cy_id, day)])
 
-                        # When both assigned, diff_ij <= 1 and diff_ij >= -1
-                        model.Add(diff_ij <= 1).OnlyEnforceIf(both_assigned)
-                        model.Add(diff_ij >= -1).OnlyEnforceIf(both_assigned)
+                # For each employee: if assigned, their work must be between min_work and max_work
+                for emp_id in emp_id_list:
+                    work_var = work_minutes[(emp_id, cy_id, day)]
+
+                    # If assigned, work >= min_work
+                    # When work_var == 0 (not assigned), this constraint doesn't apply
+                    model.Add(work_var >= min_work).OnlyEnforceIf(
+                        x[(emp_id, cy_id, day)])
+
+                    # If assigned, work <= max_work
+                    # When work_var == 0 (not assigned), this constraint doesn't apply
+                    model.Add(work_var <= max_work).OnlyEnforceIf(
+                        x[(emp_id, cy_id, day)])
+
+                    # Note: When employee is not assigned, work_var == 0 (already constrained above),
+                    # so min_work and max_work constraints don't interfere
 
     # Now apply hours constraint per employee per day using distributed minutes
     for emp_id in emp_id_list:
@@ -949,7 +1016,9 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     # Objective 2: Prioritize high-priority car yards (calculated once per yard-day)
     priority_score = []
     for cy_id in cy_id_list:
-        cy_priority_weight = priority_weights.get(car_yards[cy_id].priority, 1)
+        cy = car_yards[cy_id]  # Cache the dictionary lookup
+        cy_priority_weight = priority_weights.get(
+            cy.priority, 1)  # Reuse cached object
         for day in days:
             priority_score.append(covered[(cy_id, day)] * cy_priority_weight)
 
@@ -1053,18 +1122,30 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     total_employee_days_available = sum(
         len(emp.available_days) for emp in employees.values()
     )
+    active_employees = [
+        emp for emp in employees.values() if emp.available_days]
+    num_active_employees = len(active_employees)
+    inactive_employees = [
+        emp for emp in employees.values() if not emp.available_days]
+
     total_yard_days = len(car_yards) * len(days)
+    # Note: min/max_employees_needed is just for logging - each yard has its own requirements
     min_employees_needed = sum(cy.min_employees for cy in car_yards.values())
     max_employees_needed = sum(cy.max_employees for cy in car_yards.values())
 
     logger.info(
-        f"Feasibility check: {num_employees} employees, {total_employee_days_available} total employee-days available")
+        f"Feasibility check: {num_employees} total employees ({num_active_employees} active, {len(inactive_employees)} with no available days), {total_employee_days_available} total employee-days available")
     logger.info(
         f"Coverage needed: {num_car_yards} yards × {num_days} days = {total_yard_days} yard-days")
     logger.info(
         f"Employee availability: {[(e.id, e.name, len(e.available_days), [d.value for d in e.available_days]) for e in employees.values()]}")
     logger.debug(
-        f"Min employees needed per yard: {min_employees_needed}, Max: {max_employees_needed}")
+        f"Active employees: {[e.id for e in active_employees]}")
+    if inactive_employees:
+        logger.debug(
+            f"Inactive employees (no available days): {[e.id for e in inactive_employees]}")
+    logger.debug(
+        f"Employee requirements across all yards (sum): min={min_employees_needed}, max={max_employees_needed} (each yard has its own min-max)")
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = DEFAULT_SOLVER_TIMEOUT_SECONDS
@@ -1089,19 +1170,19 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             "Solver returned INFEASIBLE - constraints cannot be satisfied")
         logger.error("Possible reasons:")
         logger.error(
-            f"  - Not enough employees available (have {num_employees} employees)")
+            f"  - Not enough active employees available (have {num_active_employees} active employees out of {num_employees} total)")
         logger.error(
-            f"  - Employee availability too restrictive (total {total_employee_days_available} employee-days)")
+            f"  - Employee availability too restrictive (total {total_employee_days_available} employee-days from {num_active_employees} active employees)")
         logger.error(
-            f"  - Yard requirements too high (need {min_employees_needed}-{max_employees_needed} employees per assignment)")
+            f"  - Yard requirements: {num_car_yards} yards with individual min-max employee requirements (not per assignment, but per yard)")
         logger.error(
             f"  - Max hours per day too restrictive ({request.max_hours_per_day} hours)")
-        # Check for employees with no availability
+        # Check for employees with no availability (informational only - they simply won't be assigned)
         no_availability = [
             e for e in employees.values() if not e.available_days]
         if no_availability:
-            logger.error(
-                f"  - Employees with NO available days: {[(e.id, e.name) for e in no_availability]}")
+            logger.info(
+                f"  - Employees with no available days (will not be assigned): {[(e.id, e.name) for e in no_availability]}")
     elif status == cp_model.UNKNOWN:
         logger.warning(
             "Solver returned UNKNOWN - may have timed out or hit resource limits")
@@ -1385,7 +1466,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                 e for e in employees.values() if not e.available_days]
             detail = f"No feasible solution found. The constraints cannot be satisfied. "
             if no_availability:
-                detail += f"Employees with no available days: {[e.name for e in no_availability]}. "
+                detail += f"Note: {len(no_availability)} employee(s) have no available days and will not be assigned: {[e.name for e in no_availability]}. "
             detail += f"Check employee availability, yard requirements, and max hours per day ({request.max_hours_per_day}h)."
         elif status == cp_model.UNKNOWN:
             detail = f"Solver could not determine feasibility (may have timed out after {DEFAULT_SOLVER_TIMEOUT_SECONDS}s). Try increasing timeout or relaxing constraints."

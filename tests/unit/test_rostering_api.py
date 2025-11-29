@@ -181,6 +181,155 @@ def test_ranking_preference():
     assert shifts_count["1"] >= shifts_count["2"]
 
 
+def test_employee_with_empty_available_days():
+    """Test that employees with empty available_days are handled correctly - they simply won't be assigned"""
+    employees = [
+        Employee(
+            id=1,
+            name="Available Employee",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY]
+        ),
+        Employee(
+            id=2,
+            name="Unavailable Employee",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[]  # Empty - should be fine, just won't be assigned
+        ),
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=[
+            CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
+                    min_employees=1, max_employees=1, hours_required=4.0, north_south_position=50)
+        ],
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
+        max_radius=1000
+    )
+
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+
+    data = response.json()
+    assignments = data["assignments"]
+
+    # Employee 2 (unavailable) should not have any assignments
+    employee_2_assignments = [
+        a for a in assignments if a["employee_id"] == 2
+    ]
+    assert len(employee_2_assignments) == 0, \
+        f"Employee 2 should have no assignments since they have empty available_days. Found: {employee_2_assignments}"
+
+    # Employee 1 (available) should have assignments
+    employee_1_assignments = [
+        a for a in assignments if a["employee_id"] == 1
+    ]
+    assert len(employee_1_assignments) > 0, \
+        f"Employee 1 should have assignments. Found: {employee_1_assignments}"
+
+    # Verify stats don't include employee 2
+    shifts_count = data["stats"]["shifts_per_employee"]
+    assert shifts_count.get("2", 0) == 0, \
+        f"Employee 2 should have 0 shifts in stats. Found: {shifts_count.get('2')}"
+
+
+def test_realistic_schedule_with_sample_data(sample_employees, sample_car_yards, sample_days):
+    """Test a realistic schedule using the sample data - should find a feasible solution"""
+    request = ScheduleRequest(
+        employees=sample_employees,
+        car_yards=sample_car_yards,
+        days=sample_days,
+        max_hours_per_day=7.0,
+        travel_buffer_minutes=30,
+        max_radius=1000
+    )
+
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
+
+    # This should succeed - the sample data is designed to be feasible
+    assert response.status_code == 200, \
+        f"Expected successful roster generation, got {response.status_code}: {response.text[:500]}"
+
+    data = response.json()
+    assert data["status"] in ["optimal", "feasible"]
+    assert len(data["assignments"]
+               ) > 0, "Should have at least some assignments"
+
+    # Verify no employee exceeds max_hours_per_day
+    stats = data["stats"]
+    hours_per_employee_day = stats["hours_per_employee_day"]
+    for key, hours in hours_per_employee_day.items():
+        assert hours <= 7.0 + 0.01, \
+            f"Employee-day {key} exceeds max hours: {hours} > 7.0"
+
+
+def test_realistic_schedule_with_employee_no_available_days(sample_car_yards, sample_days):
+    """Test that employees with empty available_days don't break feasibility"""
+    employees = [
+        Employee(
+            id=1,
+            name="Available Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
+                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
+        ),
+        Employee(
+            id=2,
+            name="Available Employee 2",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
+                            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]
+        ),
+        Employee(
+            id=3,
+            name="Unavailable Employee",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[]  # Empty - should not affect feasibility
+        ),
+    ]
+
+    # Use a subset of yards that should be feasible with 2 available employees
+    feasible_yards = [
+        CarYard(id=1, name="Yard A", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=4.0, north_south_position=50),
+        CarYard(id=2, name="Yard B", priority=CarYardPriority.HIGH,
+                min_employees=1, max_employees=2, hours_required=4.0, north_south_position=50),
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=feasible_yards,
+        days=[DayOfWeek.MONDAY, DayOfWeek.TUESDAY],
+        max_hours_per_day=8.0,
+        travel_buffer_minutes=30,
+        max_radius=1000
+    )
+
+    response = client.post(
+        "/api/v1/roster", json=request.model_dump(mode="json"))
+
+    # Should succeed - employee 3 has no available days but that's fine
+    assert response.status_code == 200, \
+        f"Expected successful roster generation with employee having no available days, got {response.status_code}: {response.text[:500]}"
+
+    data = response.json()
+    assignments = data["assignments"]
+
+    # Employee 3 (unavailable) should not have any assignments
+    employee_3_assignments = [a for a in assignments if a["employee_id"] == 3]
+    assert len(employee_3_assignments) == 0, \
+        f"Employee 3 should have no assignments. Found: {employee_3_assignments}"
+
+    # At least one of the available employees should have assignments
+    employee_1_or_2_assignments = [
+        a for a in assignments if a["employee_id"] in [1, 2]]
+    assert len(employee_1_or_2_assignments) > 0, \
+        "At least one available employee should have assignments"
+
+
 def test_one_employee_one_yard():
     """Test minimal scenario"""
     request = ScheduleRequest(
@@ -252,12 +401,6 @@ def test_workload_balance():
     # ideal distribution would be 1-2 shifts each
     # Difference should be small (workload balance)
     assert max_shifts - min_shifts <= 2  # Allow some flexibility
-
-
-def test_realistic_roster():
-    """Testing close to genuine roster"""
-
-    pass
 
 
 def test_priority_based_assignment():
