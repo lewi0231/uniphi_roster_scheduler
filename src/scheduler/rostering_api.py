@@ -326,6 +326,12 @@ OBJECTIVE_BALANCE_WEIGHT = 100  # previously was set at 50
 OBJECTIVE_EXTRA_EMPLOYEE_WEIGHT = 2000
 OBJECTIVE_PARTIAL_OVERLAP_WEIGHT = 2000
 OBJECTIVE_ASSIGNMENT_PENALTY = 10
+# New penalty weights (soft constraints)
+OBJECTIVE_RADIUS_PENALTY_WEIGHT = 500
+OBJECTIVE_GAP_PENALTY_WEIGHT = 300
+OBJECTIVE_LINKED_GAP_PENALTY_WEIGHT = 400
+OBJECTIVE_MAX_HOURS_OVERAGE_WEIGHT = 200
+OBJECTIVE_HOURS_SHORTFALL_WEIGHT = 150
 
 # Priority weights for yard coverage
 PRIORITY_WEIGHT_HIGH = 1000
@@ -339,6 +345,9 @@ GROUPING_BONUS_BASE_WEIGHT = 50
 # Solver timeout - can be overridden via SOLVER_TIMEOUT_SECONDS environment variable
 DEFAULT_SOLVER_TIMEOUT_SECONDS = float(
     os.getenv("SOLVER_TIMEOUT_SECONDS", "30.0"))
+# Allowable overage buffer for max-hours (minutes)
+HOURS_OVERAGE_BUFFER_MINUTES = int(
+    os.getenv("HOURS_OVERAGE_BUFFER_MINUTES", "120"))
 
 # Time constants
 DEFAULT_EARLIEST_START_HOUR = 6
@@ -624,42 +633,33 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         has_per_week = bool(cy.per_week)
         has_required_days = bool(cy.required_days)
 
-        # If required_days is set but per_week is NOT set: restrict to only required days
-        if has_required_days and not has_per_week:
+        # REQUIRED DAYS TAKE PRECEDENCE
+        if has_required_days:
             allowed_days = set(cy.required_days)
             for day in days:
                 if day not in allowed_days:
                     model.Add(covered[(cy_id, day)] == 0)
                     for emp_id in emp_id_list:
                         model.Add(x[(emp_id, cy_id, day)] == 0)
-        # If required_days is set WITH per_week: allow all days (no restriction here)
-        # We'll add a constraint later to ensure at least one visit on a required day
+            # Require coverage on every required day (exactly once per required day)
+            for day in cy.required_days:
+                model.Add(covered[(cy_id, day)] == 1)
 
-        if cy.per_week:
-            visits_required, min_gap = cy.per_week
-            # Validate that required visits don't exceed available days
-            if visits_required > num_days:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Car yard {cy_id} ({cy.name}) requires {visits_required} visits per week but only {num_days} days are scheduled."
-                )
-            # If required_days is also set, validate that at least one visit can occur on a required day
-            # This means we need enough days between required days and other days to satisfy gap
-            if has_required_days:
-                required_days_set = set(cy.required_days)
-                # Check if there are enough days available after considering the gap constraint
-                # For example, if per_week=(2, 2) and required_days=[MONDAY], we need:
-                # - At least one day that's Monday (required)
-                # - At least one day that's at least gap days away from Monday
-                available_days_set = set(days)
-                if not required_days_set.issubset(available_days_set):
-                    missing_days = required_days_set - available_days_set
+            # Ignore per_week counts when required days are present
+            visits_required = len(cy.required_days)
+            min_gap = 0
+        else:
+            if cy.per_week:
+                visits_required, min_gap = cy.per_week
+                # Validate that required visits don't exceed available days
+                if visits_required > num_days:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Car yard {cy_id} ({cy.name}) has required_days {[d.value for d in missing_days]} that are not in the scheduled days {[d.value for d in days]}."
+                        detail=f"Car yard {cy_id} ({cy.name}) requires {visits_required} visits per week but only {num_days} days are scheduled."
                     )
-        else:
-            visits_required, min_gap = (1, 0)
+            else:
+                visits_required, min_gap = (1, 0)
+
         coverage_requirements[cy_id] = (visits_required, min_gap)
 
         if cy.linked_yard:
@@ -719,19 +719,6 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     # Constraint 1 (UPDATED): If a yard is covered, it must have between min and max employees
     # If not covered, it has 0 employees
     extra_employee_penalties = []
-    # Track which yard-days have employees working only that single yard (for penalty application)
-    is_single_yard_only: Dict[Tuple[int, DayOfWeek], cp_model.IntVar] = {}
-
-    # Pre-compute employee-day total yards for single yard detection optimization
-    # This allows us to reuse the total calculation instead of recalculating for each yard
-    employee_day_total_yards: Dict[Tuple[int,
-                                         DayOfWeek], cp_model.LinearExpr] = {}
-    for emp_id in emp_id_list:
-        for day in days:
-            # Total yards worked by this employee on this day (as LinearExpr, not IntVar)
-            employee_day_total_yards[(emp_id, day)] = sum(
-                x[(emp_id, cy_id, day)] for cy_id in cy_id_list
-            )
 
     for cy_id, cy in car_yards.items():
         for day in days:
@@ -748,85 +735,23 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             model.Add(employees_at_yard <= cy.max_employees *
                       covered[(cy_id, day)])
 
-            # Check if any employee at this yard is working ONLY this yard (not working other yards)
-            # Penalty should only apply when employees are working a single yard, not when doing multiple
-            # This allows efficient multi-yard sequences (e.g., Joe and Sam doing Yard A then Yard B)
-            # OPTIMIZED: Directly check if total_yards_worked == 1 without intermediate variable
-            employee_single_yard_vars = []
-            for emp_id in emp_id_list:
-                # Check if employee is assigned to this yard
-                is_at_this_yard = x[(emp_id, cy_id, day)]
-
-                # Use pre-computed total yards worked (already calculated once per employee per day)
-                total_yards_worked = employee_day_total_yards[(emp_id, day)]
-
-                # Employee is working ONLY this yard if:
-                # - They're assigned to this yard (is_at_this_yard == 1)
-                # - AND they work exactly 1 yard total (total_yards_worked == 1)
-                emp_single_yard = model.NewBoolVar(
-                    f'emp_single_yard_e{emp_id}_cy{cy_id}_{day}')
-
-                # emp_single_yard == 1 if and only if (is_at_this_yard == 1 AND total_yards_worked == 1)
-                # Constraint 1: emp_single_yard can only be 1 if employee is at this yard
-                model.Add(emp_single_yard <= is_at_this_yard)
-
-                # Constraint 2: emp_single_yard can only be 1 if total_yards_worked <= 1
-                # If total_yards_worked >= 2, then emp_single_yard <= 0 (forces 0)
-                model.Add(emp_single_yard <= 2 - total_yards_worked)
-
-                # Constraint 3: If employee is at this yard and total_yards_worked == 1, emp_single_yard must be 1
-                # Only enforce when is_at_this_yard == 1 to avoid contradictions
-                # When is_at_this_yard == 1 and total_yards_worked == 1: emp_single_yard >= 1 + 1 - 1 = 1 (forces it to 1)
-                model.Add(emp_single_yard >= is_at_this_yard + 1 -
-                          total_yards_worked).OnlyEnforceIf(is_at_this_yard)
-
-                employee_single_yard_vars.append(emp_single_yard)
-
-            # Check if ANY employee at this yard is working only this yard (single yard only)
-            # Penalty applies only if at least one employee is working a single yard
-            any_employee_single_yard = model.NewBoolVar(
-                f'any_emp_single_yard_cy{cy_id}_{day}')
-            is_single_yard_only[(cy_id, day)] = any_employee_single_yard
-
-            # If any employee is single-yard, then any_employee_single_yard == 1
-            for emp_single_yard_var in employee_single_yard_vars:
-                model.Add(emp_single_yard_var <= any_employee_single_yard)
-            # If any_employee_single_yard == 1, then at least one employee must be single-yard
-            model.Add(any_employee_single_yard <=
-                      sum(employee_single_yard_vars))
-
-            # Calculate extra employees above minimum
+            # Calculate extra employees above minimum (always penalize extras when covered)
             extra_employees = employees_at_yard - \
                 cy.min_employees * covered[(cy_id, day)]
 
-            # Only apply penalty if:
-            # 1. Yard is covered (covered == 1)
-            # 2. At least one employee is working only this yard (any_employee_single_yard == 1)
-            # 3. There are extra employees above minimum
-            # penalty_amount = extra_employees if (covered == 1 AND any_employee_single_yard == 1), else 0
             penalty_amount = model.NewIntVar(
                 0, num_employees, f'penalty_amount_cy{cy_id}_{day}')
 
-            # Upper bounds: penalty cannot exceed extra_employees, and only applies when both conditions are true
-            model.Add(penalty_amount <= extra_employees)
-            model.Add(penalty_amount <= covered[(cy_id, day)] * num_employees)
-            model.Add(penalty_amount <=
-                      any_employee_single_yard * num_employees)
-
-            # Lower bound: if both conditions are true, penalty should equal extra_employees
-            # penalty_amount >= extra_employees - M * (1 - covered) - M * (1 - any_employee_single_yard)
-            max_penalty = num_employees
-            model.Add(penalty_amount >= extra_employees -
-                      max_penalty * (1 - covered[(cy_id, day)]))
-            model.Add(penalty_amount >= extra_employees -
-                      max_penalty * (1 - any_employee_single_yard))
+            model.Add(penalty_amount == 0).OnlyEnforceIf(
+                covered[(cy_id, day)].Not())
+            model.Add(penalty_amount == extra_employees).OnlyEnforceIf(
+                covered[(cy_id, day)])
 
             extra_employee_penalties.append(penalty_amount)
 
-    # Constraint: Yards scheduled on the same day must be within max_radius
-    # This prevents scheduling yards that are too far apart geographically
-    # Optimize by pre-computing which yard pairs exceed max_radius
+    # Constraint: Yards scheduled on the same day incur a penalty if they exceed max_radius
     yard_pairs_exceeding_radius = []
+    radius_penalties = []
     sorted_yard_ids = sorted(car_yards.keys())
     for i in range(len(sorted_yard_ids)):
         cy_a_id = sorted_yard_ids[i]
@@ -839,28 +764,25 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             if position_diff > request.max_radius:
                 yard_pairs_exceeding_radius.append((cy_a_id, cy_b_id))
 
-    # Log how many constraints will be added (for debugging)
-    total_radius_constraints = len(yard_pairs_exceeding_radius) * num_days
-    if total_radius_constraints > 0:
-        logger.debug(
-            f"Adding {total_radius_constraints} max_radius constraints ({len(yard_pairs_exceeding_radius)} pairs × {len(days)} days)")
-
-    # Only add constraints for pairs that actually exceed the radius
     for day in days:
         for cy_a_id, cy_b_id in yard_pairs_exceeding_radius:
-            # Cannot schedule both yards on the same day
-            # If yard A is covered, then yard B cannot be covered on this day
-            # If yard B is covered, then yard A cannot be covered on this day
-            model.AddBoolOr([
-                covered[(cy_a_id, day)].Not(),
-                covered[(cy_b_id, day)].Not()
-            ])
+            both_covered = model.NewBoolVar(
+                f'radius_violation_cy{cy_a_id}_{cy_b_id}_{day}')
+            model.Add(both_covered <= covered[(cy_a_id, day)])
+            model.Add(both_covered <= covered[(cy_b_id, day)])
+            model.Add(both_covered >= covered[(cy_a_id, day)] +
+                      covered[(cy_b_id, day)] - 1)
+            radius_penalties.append(both_covered)
 
     # Constraint 2: Limit total hours per employee per day
     # Distribute total yard hours across assigned employees while respecting per-employee limits
     SCALE_FACTOR = MINUTES_PER_HOUR  # Convert hours to minutes for integer arithmetic
     work_minutes: Dict[Tuple[int, int, DayOfWeek], cp_model.IntVar] = {}
     employee_day_minutes: Dict[Tuple[int, DayOfWeek], cp_model.IntVar] = {}
+    gap_penalties = []
+    linked_gap_penalties = []
+    hours_shortfall_penalties = []
+    hours_overage_penalties = []
     for cy_id, cy in car_yards.items():
         total_minutes = int(cy.hours_required * SCALE_FACTOR)
         for day in days:
@@ -877,10 +799,19 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                 work_vars.append(work_var)
 
             total_work = sum(work_vars)
-            model.Add(total_work == total_minutes).OnlyEnforceIf(
+            # Allow partial allocation with penalty
+            model.Add(total_work <= total_minutes).OnlyEnforceIf(
                 covered[(cy_id, day)])
             model.Add(total_work == 0).OnlyEnforceIf(
                 covered[(cy_id, day)].Not())
+
+            shortfall = model.NewIntVar(
+                0, total_minutes, f'shortfall_cy{cy_id}_d{day}')
+            model.Add(shortfall == 0).OnlyEnforceIf(
+                covered[(cy_id, day)].Not())
+            model.Add(shortfall == total_minutes -
+                      total_work).OnlyEnforceIf(covered[(cy_id, day)])
+            hours_shortfall_penalties.append(shortfall)
 
             # Enforce approximately equal work distribution (OPTIMIZED: O(n) instead of O(n²))
             # When a yard is covered, all assigned employees should work approximately the same amount
@@ -926,13 +857,21 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         for day in days:
             total_minutes_worked = model.NewIntVar(
                 0, int(request.max_hours_per_day *
-                       SCALE_FACTOR * num_car_yards),
+                       SCALE_FACTOR * num_car_yards) + HOURS_OVERAGE_BUFFER_MINUTES,
                 f'total_minutes_e{emp_id}_d{day}')
             employee_day_minutes[(emp_id, day)] = total_minutes_worked
             model.Add(total_minutes_worked == sum(
                 work_minutes[(emp_id, cy_id, day)] for cy_id in cy_id_list))
             max_minutes = int(request.max_hours_per_day * SCALE_FACTOR)
-            model.Add(total_minutes_worked <= max_minutes)
+            max_minutes_with_buffer = max_minutes + HOURS_OVERAGE_BUFFER_MINUTES
+
+            overage = model.NewIntVar(
+                0, HOURS_OVERAGE_BUFFER_MINUTES, f'overage_e{emp_id}_d{day}')
+            model.Add(total_minutes_worked <= max_minutes_with_buffer)
+            model.Add(overage >= total_minutes_worked - max_minutes)
+            model.Add(overage <= HOURS_OVERAGE_BUFFER_MINUTES)
+
+            hours_overage_penalties.append(overage)
 
     # Constraint 3: Car yard visit frequency and spacing (per_week)
     linked_yard_ids = {cy for pair in link_pairs.keys() for cy in pair}
@@ -965,10 +904,13 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             for i in range(len(days)):
                 for j in range(i + 1, len(days)):
                     if day_index[days[j]] - day_index[days[i]] < min_gap:
-                        model.AddBoolOr([
-                            coverage_vars[i].Not(),
-                            coverage_vars[j].Not()
-                        ])
+                        both = model.NewBoolVar(
+                            f'gap_violation_cy{cy_id}_{days[i]}_{days[j]}')
+                        model.Add(both <= coverage_vars[i])
+                        model.Add(both <= coverage_vars[j])
+                        model.Add(both >= coverage_vars[i] +
+                                  coverage_vars[j] - 1)
+                        gap_penalties.append(both)
 
         # Constraint 3b: When both required_days and per_week are set,
         # ensure at least one visit occurs on a required day
@@ -988,20 +930,17 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         if source_id not in car_yards or target_id not in car_yards:
             continue
 
-        if gap_days <= 0:
-            for day in days:
-                model.Add(covered[(source_id, day)] ==
-                          covered[(target_id, day)])
-            continue
-
         for day_a in days:
             for day_b in days:
                 diff = abs(day_index[day_a] - day_index[day_b])
-                if diff < gap_days:
-                    model.AddBoolOr([
-                        covered[(source_id, day_a)].Not(),
-                        covered[(target_id, day_b)].Not()
-                    ])
+                if gap_days > 0 and diff < gap_days:
+                    both_linked = model.NewBoolVar(
+                        f'linked_gap_violation_{source_id}_{target_id}_{day_a}_{day_b}')
+                    model.Add(both_linked <= covered[(source_id, day_a)])
+                    model.Add(both_linked <= covered[(target_id, day_b)])
+                    model.Add(both_linked >= covered[(source_id, day_a)] +
+                              covered[(target_id, day_b)] - 1)
+                    linked_gap_penalties.append(both_linked)
 
     # Constraint 5: Employee availability is already handled above (combined with yard exclusion)
 
@@ -1088,7 +1027,17 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         # Mild penalty on total assignments to avoid redundant coverage
         -total_assignments * OBJECTIVE_ASSIGNMENT_PENALTY,
         # Penalize partial overlaps where new employees join existing crews mid-day
-        -sum(partial_overlap_penalties) * OBJECTIVE_PARTIAL_OVERLAP_WEIGHT
+        -sum(partial_overlap_penalties) * OBJECTIVE_PARTIAL_OVERLAP_WEIGHT,
+        # Penalize distant yard pairs scheduled same day
+        -sum(radius_penalties) * OBJECTIVE_RADIUS_PENALTY_WEIGHT,
+        # Penalize visits that violate per-week spacing
+        -sum(gap_penalties) * OBJECTIVE_GAP_PENALTY_WEIGHT,
+        # Penalize linked yards scheduled too close together
+        -sum(linked_gap_penalties) * OBJECTIVE_LINKED_GAP_PENALTY_WEIGHT,
+        # Penalize exceeding max hours guideline
+        -sum(hours_overage_penalties) * OBJECTIVE_MAX_HOURS_OVERAGE_WEIGHT,
+        # Penalize underservicing yard hours
+        -sum(hours_shortfall_penalties) * OBJECTIVE_HOURS_SHORTFALL_WEIGHT
     ]
 
     model.Maximize(sum(objective_components))
