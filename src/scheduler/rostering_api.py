@@ -344,7 +344,7 @@ GROUPING_BONUS_BASE_WEIGHT = 50
 # Solver configuration
 # Solver timeout - can be overridden via SOLVER_TIMEOUT_SECONDS environment variable
 DEFAULT_SOLVER_TIMEOUT_SECONDS = float(
-    os.getenv("SOLVER_TIMEOUT_SECONDS", "30.0"))
+    os.getenv("SOLVER_TIMEOUT_SECONDS", "120.0"))
 # Allowable overage buffer for max-hours (minutes)
 HOURS_OVERAGE_BUFFER_MINUTES = int(
     os.getenv("HOURS_OVERAGE_BUFFER_MINUTES", "120"))
