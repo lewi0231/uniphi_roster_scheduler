@@ -6,6 +6,7 @@ metadata:
   name: fastapi-config
   namespace: production
 data:
-  LOG_LEVEL: "DEBUG"
+  LOG_LEVEL: "INFO"
   ENVIRONMENT: "production"
-  DEFAULT_SOLVER_TIMEOUT_SECONDS: "120"
+  SOLVER_TIMEOUT_SECONDS: "120"
+  HOURS_OVERAGE_BUFFER_MINUTES: "120"

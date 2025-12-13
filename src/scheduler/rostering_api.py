@@ -46,17 +46,31 @@ except:
 
 # Request logging middleware
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    # Health check endpoints that should be logged at DEBUG level only
+    HEALTH_CHECK_PATHS = ["/health", "/ready", "/"]
+
     async def dispatch(self, request: Request, call_next):
-        logger.info(f"Request: {request.method} {request.url.path}")
-        logger.debug(f"Request headers: {dict(request.headers)}")
-        logger.debug(
-            f"Content-Type: {request.headers.get('content-type', 'not set')}")
-        logger.debug(
-            f"Content-Length: {request.headers.get('content-length', 'not set')}")
+        # Log health checks at DEBUG level to reduce log clutter
+        is_health_check = request.url.path in self.HEALTH_CHECK_PATHS
+
+        if is_health_check:
+            logger.debug(f"Health check: {request.method} {request.url.path}")
+        else:
+            logger.info(f"Request: {request.method} {request.url.path}")
+            logger.debug(f"Request headers: {dict(request.headers)}")
+            logger.debug(
+                f"Content-Type: {request.headers.get('content-type', 'not set')}")
+            logger.debug(
+                f"Content-Length: {request.headers.get('content-length', 'not set')}")
 
         response = await call_next(request)
-        logger.info(
-            f"Response: {response.status_code} for {request.method} {request.url.path}")
+
+        if is_health_check:
+            logger.debug(
+                f"Health check response: {response.status_code} for {request.method} {request.url.path}")
+        else:
+            logger.info(
+                f"Response: {response.status_code} for {request.method} {request.url.path}")
         return response
 
 
