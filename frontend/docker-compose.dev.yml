@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  work-rate-calculator-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount source code for hot reloading
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_APP_ENV=development
+      - NEXT_PUBLIC_APP_URL=http://localhost:3000
+      - NEXT_PUBLIC_ANALYTICS_ENABLED=false
+      - NEXT_PUBLIC_ENABLE_DEBUG_MODE=true
+      - NEXT_PUBLIC_ENABLE_CONSOLE_LOGS=true
+    stdin_open: true
+    tty: true 

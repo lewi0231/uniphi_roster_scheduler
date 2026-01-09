@@ -1,0 +1,2 @@
+# This file ensures the public folder exists for Docker builds
+# Next.js public folder is used for static assets like images, favicons, etc. 

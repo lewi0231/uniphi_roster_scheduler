@@ -1,0 +1,22 @@
+{
+  "folders": [
+    {
+      "path": "../../.."
+    },
+    {
+      "path": ".."
+    },
+    {
+      "path": "../../../clusters"
+    },
+    {
+      "path": "../../../homelab-infra"
+    },
+    {
+      "path": "../../chris-coombs-blog"
+    }
+  ],
+  "settings": {
+    "workbench.activityBar.orientation": "vertical"
+  }
+}

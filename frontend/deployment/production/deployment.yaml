@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: work-rate-calculator
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      app: work-rate-calculator
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: work-rate-calculator
+    spec:
+      imagePullSecrets:
+        - name: ghcr-credentials
+      containers:
+        - name: work-rate-calculator
+          image: ghcr.io/lewi0231/work-rate-calculator:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          env:
+            - name: ROSTER_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: scheduler-secrets
+                  key: ROSTER_ENDPOINT
+            - name: BASE_SCHEDULER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: scheduler-secrets
+                  key: BASE_SCHEDULER_URL
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: work-rate-calculator
+  namespace: production
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 3000
+  selector:
+    app: work-rate-calculator
