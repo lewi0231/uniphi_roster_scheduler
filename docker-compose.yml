@@ -11,6 +11,7 @@ services:
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SOLVER_TIMEOUT_SECONDS=${SOLVER_TIMEOUT_SECONDS:-120.0}
+      # SOLVER_NUM_WORKERS is optional - defaults to CPU cores if not set or empty
       - SOLVER_NUM_WORKERS=${SOLVER_NUM_WORKERS:-}
       - ENVIRONMENT=docker
     healthcheck:
@@ -28,10 +29,13 @@ services:
       dockerfile: Dockerfile
     container_name: roster-scheduler-frontend
     ports:
-      - "3000:3000"
+      - "3333:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://backend:8888
-      # For React/Vite apps, use: VITE_API_URL=http://backend:8888
+      # Client-side API URL (for browser requests if needed)
+      - NEXT_PUBLIC_API_URL=http://localhost:8888
+      # Server-side API configuration (required for server actions)
+      - BASE_SCHEDULER_URL=http://backend:8888
+      - ROSTER_ENDPOINT=/api/v1/roster
     depends_on:
       backend:
         condition: service_healthy

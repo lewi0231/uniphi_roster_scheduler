@@ -13,17 +13,29 @@ The easiest way to run this application is with Docker Compose. This packages bo
 
 ### Quick Start
 
-1. **Copy your frontend code** into the `frontend/` directory (if not already present)
+1. **Clone or download this repository**
 
 2. **Run with Docker Compose:**
 
+   **Mac/Linux:**
+
    ```bash
+   ./start.sh
+   # OR
+   docker-compose up --build
+   ```
+
+   **Windows:**
+
+   ```batch
+   run.bat
+   # OR
    docker-compose up --build
    ```
 
 3. **Access the application:**
 
-   - Frontend: http://localhost:3000
+   - Frontend: http://localhost:3333
    - Backend API: http://localhost:8888
    - API Documentation: http://localhost:8888/docs
 
@@ -32,10 +44,14 @@ The easiest way to run this application is with Docker Compose. This packages bo
    docker-compose down
    ```
 
+### Sharing with Others
+
+To share this application with colleagues, see **[DISTRIBUTION.md](DISTRIBUTION.md)** for detailed instructions.
+
 ### Docker Configuration
 
 - **Backend**: Runs on port 8888 (internal: `http://backend:8888`)
-- **Frontend**: Runs on port 3000
+- **Frontend**: Runs on port 3333 (mapped from container port 3000)
 - **Health checks**: Automatically configured
 - **Environment variables**: Can be set in `docker-compose.yml` or `.env` file
 

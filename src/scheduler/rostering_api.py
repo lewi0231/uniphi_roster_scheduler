@@ -371,9 +371,12 @@ GROUPING_BONUS_BASE_WEIGHT = 50
 DEFAULT_SOLVER_TIMEOUT_SECONDS = float(
     os.getenv("SOLVER_TIMEOUT_SECONDS", "120.0"))
 # CP-SAT parallelism (number of workers/threads). Defaults to CPU cores.
-DEFAULT_SOLVER_NUM_WORKERS = int(
-    os.getenv("SOLVER_NUM_WORKERS", str(os.cpu_count() or 1))
-)
+# Handle empty string case from docker-compose environment variables
+_solver_workers_env = os.getenv("SOLVER_NUM_WORKERS", "").strip()
+if _solver_workers_env:
+    DEFAULT_SOLVER_NUM_WORKERS = int(_solver_workers_env)
+else:
+    DEFAULT_SOLVER_NUM_WORKERS = os.cpu_count() or 1
 # Allowable overage buffer for max-hours (minutes)
 HOURS_OVERAGE_BUFFER_MINUTES = int(
     os.getenv("HOURS_OVERAGE_BUFFER_MINUTES", "120"))
