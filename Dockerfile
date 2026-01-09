@@ -3,11 +3,11 @@ FROM python:3.10-slim as builder
 
 WORKDIR /app
 
-# Install system dependencies for OR-Tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Install system dependencies for OR-Tools (optimized for low memory)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl g++ && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
@@ -27,10 +27,11 @@ ENV PATH=/root/.local/bin:$PATH
 # Copy application code
 COPY src/ ./src/
 
-# Install curl for health checks
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Install curl for health checks (optimized for low memory)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Expose the port
 EXPOSE 8888

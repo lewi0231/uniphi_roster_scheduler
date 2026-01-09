@@ -48,6 +48,10 @@ The easiest way to run this application is with Docker Compose. This packages bo
 
 To share this application with colleagues, see **[DISTRIBUTION.md](DISTRIBUTION.md)** for detailed instructions.
 
+### Troubleshooting
+
+If you encounter build errors (especially "out of memory" errors), see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for solutions.
+
 ### Docker Configuration
 
 - **Backend**: Runs on port 8888 (internal: `http://backend:8888`)

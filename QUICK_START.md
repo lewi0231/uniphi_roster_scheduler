@@ -109,10 +109,47 @@ docker-compose down
 - Make sure Docker Desktop is running
 - Restart Docker Desktop if needed
 
-### "Out of memory" errors
+### "Out of memory" or "ResourceExhausted: cannot allocate memory" errors
 
-- Close other applications
-- Increase Docker Desktop memory limit (Settings > Resources)
+**This is the most common issue on Windows!**
+
+**Fix: Increase Docker Desktop Memory**
+
+1. **Open Docker Desktop**
+
+   - Right-click Docker icon in system tray (bottom-right)
+   - Click "Settings"
+
+2. **Go to Resources**
+
+   - Click "Resources" in left sidebar
+   - Click "Advanced" tab
+
+3. **Increase Memory**
+
+   - Move "Memory" slider to **at least 4GB** (4096 MB)
+   - **Recommended: 6-8GB** if your PC has enough RAM
+   - Click "Apply & Restart"
+
+4. **Wait for Docker to restart** (1-2 minutes)
+
+5. **Close other applications** to free up RAM
+
+6. **Try building again:**
+   ```bash
+   docker-compose up --build
+   ```
+
+**If still failing:**
+
+- Build services one at a time:
+  ```bash
+  docker-compose build backend
+  docker-compose build frontend
+  docker-compose up
+  ```
+
+See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for more details.
 
 ### Slow performance
 
