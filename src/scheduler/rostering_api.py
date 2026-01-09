@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, computed_field, ValidationError
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Set
 from ortools.sat.python import cp_model
 from datetime import time, datetime, timedelta
 from enum import Enum
@@ -126,6 +126,13 @@ class CarYardPriority(str, Enum):
     LOW = "low"
 
 
+class RadiusMode(str, Enum):
+    """How to apply the geographic radius rule (north_south_position)."""
+    SOFT = "soft"  # penalize far-apart yards on the same day
+    HARD = "hard"  # forbid far-apart yards on the same day
+    OFF = "off"    # ignore radius entirely
+
+
 class Employee(BaseModel):
     id: int
     name: str
@@ -171,6 +178,10 @@ class ScheduleRequest(BaseModel):
     max_radius: int = Field(
         default=1000, ge=0,
         description="Maximum position difference between yards that can be scheduled same day")
+    radius_mode: RadiusMode = Field(
+        default=RadiusMode.SOFT,
+        description="How to apply max_radius: 'soft' (penalty), 'hard' (forbid), or 'off' (ignore)."
+    )
 
 
 class Assignment(BaseModel):
@@ -359,6 +370,10 @@ GROUPING_BONUS_BASE_WEIGHT = 50
 # Solver timeout - can be overridden via SOLVER_TIMEOUT_SECONDS environment variable
 DEFAULT_SOLVER_TIMEOUT_SECONDS = float(
     os.getenv("SOLVER_TIMEOUT_SECONDS", "120.0"))
+# CP-SAT parallelism (number of workers/threads). Defaults to CPU cores.
+DEFAULT_SOLVER_NUM_WORKERS = int(
+    os.getenv("SOLVER_NUM_WORKERS", str(os.cpu_count() or 1))
+)
 # Allowable overage buffer for max-hours (minutes)
 HOURS_OVERAGE_BUFFER_MINUTES = int(
     os.getenv("HOURS_OVERAGE_BUFFER_MINUTES", "120"))
@@ -381,7 +396,8 @@ def _create_partial_overlap_penalty(
     cy_a: int,
     cy_b: int,
     day: DayOfWeek,
-    x: Dict[Tuple[int, int, DayOfWeek], cp_model.IntVar]
+    x: Dict[Tuple[int, int, DayOfWeek], cp_model.IntVar],
+    invalid_assignments: Set[Tuple[int, int, DayOfWeek]],
 ) -> cp_model.IntVar:
     """
     Create penalty variable for partial crew overlap between two yards on the same day.
@@ -401,45 +417,78 @@ def _create_partial_overlap_penalty(
     Returns:
         A boolean variable that is 1 if partial overlap occurs (penalty case)
     """
-    shared_vars = []
-    joiner_vars = []
+    # PERFORMANCE NOTE:
+    # This penalty can easily dominate model size (O(days * yards^2 * employees)).
+    # We avoid creating unnecessary variables/constraints by:
+    # - skipping employees where assignments are impossible (vars fixed to 0 / absent)
+    # - using AddMaxEquality for "any" flags rather than O(n) implications
+    shared_vars: List[cp_model.IntVar] = []
+    joiner_vars: List[cp_model.IntVar] = []
 
     for emp_id in employees.keys():
-        # shared_var = 1 if employee works both yards
+        a_key = (emp_id, cy_a, day)
+        b_key = (emp_id, cy_b, day)
+        xa = x.get(a_key)
+        xb = x.get(b_key)
+
+        # NOTE: We can't do "if xa == 0" in Python because (xa == 0) is an
+        # OR-Tools expression, not a boolean. We instead use membership in the
+        # precomputed invalid_assignments set to determine impossibility.
+        a_impossible = a_key in invalid_assignments
+        b_impossible = b_key in invalid_assignments
+
+        # If neither assignment is possible, this employee can never contribute.
+        if a_impossible and b_impossible:
+            continue
+
+        # If A is impossible but B is possible, then "joiner" is simply (works B).
+        # (They can't be a "shared" employee since shared requires both A and B.)
+        if a_impossible and not b_impossible:
+            if xb is None:
+                # Shouldn't happen if invalid_assignments is consistent with x creation,
+                # but be defensive to avoid runtime crashes.
+                continue
+            joiner_vars.append(xb)
+            continue
+
+        # If B is impossible, they can't be a joiner or shared employee for this pair.
+        if b_impossible:
+            continue
+
+        # If we got here, both A and B should be possible, so xa/xb must exist.
+        if xa is None or xb is None:
+            continue
+
+        # shared_var = 1 if employee works both yards (A AND B)
         shared_var = model.NewBoolVar(
             f'shared_e{emp_id}_cy{cy_a}_{cy_b}_{day}')
-        model.Add(shared_var <= x[(emp_id, cy_a, day)])
-        model.Add(shared_var <= x[(emp_id, cy_b, day)])
-        model.Add(shared_var >= x[(emp_id, cy_a, day)] +
-                  x[(emp_id, cy_b, day)] - 1)
+        model.Add(shared_var <= xa)
+        model.Add(shared_var <= xb)
+        model.Add(shared_var >= xa + xb - 1)
         shared_vars.append(shared_var)
 
-        # joiner_var = 1 if employee works yard B but not yard A (joins mid-day)
+        # joiner_var = 1 if employee works yard B but not yard A (B AND NOT A)
         joiner_var = model.NewBoolVar(
             f'joiner_e{emp_id}_cy{cy_a}_{cy_b}_{day}')
-        model.Add(joiner_var <= x[(emp_id, cy_b, day)])
-        model.Add(joiner_var + x[(emp_id, cy_a, day)] <= 1)
-        model.Add(joiner_var >= x[(emp_id, cy_b, day)] -
-                  x[(emp_id, cy_a, day)])
+        model.Add(joiner_var <= xb)
+        model.Add(joiner_var + xa <= 1)
+        model.Add(joiner_var >= xb - xa)
         joiner_vars.append(joiner_var)
 
-    # share_any = 1 if any employee works both yards
-    share_any = model.NewBoolVar(
-        f'share_any_cy{cy_a}_{cy_b}_{day}')
-    for shared_var in shared_vars:
-        model.Add(shared_var <= share_any)
-    model.Add(share_any <= sum(shared_vars))
+    # If either side is impossible, partial overlap cannot occur.
+    if not shared_vars or not joiner_vars:
+        return model.NewConstant(0)
 
-    # joiner_any = 1 if any employee joins mid-day (works B but not A)
-    joiner_any = model.NewBoolVar(
-        f'joiner_any_cy{cy_a}_{cy_b}_{day}')
-    for joiner_var in joiner_vars:
-        model.Add(joiner_var <= joiner_any)
-    model.Add(joiner_any <= sum(joiner_vars))
+    # share_any = OR(shared_vars)
+    share_any = model.NewBoolVar(f'share_any_cy{cy_a}_{cy_b}_{day}')
+    model.AddMaxEquality(share_any, shared_vars)
+
+    # joiner_any = OR(joiner_vars)
+    joiner_any = model.NewBoolVar(f'joiner_any_cy{cy_a}_{cy_b}_{day}')
+    model.AddMaxEquality(joiner_any, joiner_vars)
 
     # mix_var = 1 if both share_any and joiner_any are true (partial overlap penalty)
-    mix_var = model.NewBoolVar(
-        f'mix_penalty_cy{cy_a}_{cy_b}_{day}')
+    mix_var = model.NewBoolVar(f'mix_penalty_cy{cy_a}_{cy_b}_{day}')
     model.Add(mix_var >= share_any + joiner_any - 1)
     model.Add(mix_var <= share_any)
     model.Add(mix_var <= joiner_any)
@@ -618,16 +667,6 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     cy_id_list = list(car_yards.keys())
     max_other_yards = num_car_yards - 1
 
-    # Decision variables: x[e][cy][d] = 1 if employee e works at car_yard cy on day d
-    # Pre-compute invalid assignments to avoid creating unnecessary variables
-    # (Note: We still create all variables for simplicity, but could optimize further)
-    x = {}
-    for emp_id in emp_id_list:
-        for cy_id in cy_id_list:
-            for day in days:
-                x[(emp_id, cy_id, day)] = model.NewBoolVar(
-                    f'x_e{emp_id}_cy{cy_id}_{day}')
-
     # NEW: Decision variable for whether a yard is covered on a day
     # covered[cy][d] = 1 if car_yard cy is covered (has at least min_employees) on day d
     covered = {}
@@ -639,6 +678,8 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     day_index = {day: idx for idx, day in enumerate(days)}
     coverage_requirements: Dict[int, Tuple[int, int]] = {}
     link_pairs: Dict[Tuple[int, int], int] = {}
+    disallowed_yard_days: Dict[int, Set[DayOfWeek]] = {
+        cy_id: set() for cy_id in cy_id_list}
 
     # Restrict assignments to allowed days and collect visit requirements
     # When required_days is set WITHOUT per_week: restrict to only required days (current behavior)
@@ -653,8 +694,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             for day in days:
                 if day not in allowed_days:
                     model.Add(covered[(cy_id, day)] == 0)
-                    for emp_id in emp_id_list:
-                        model.Add(x[(emp_id, cy_id, day)] == 0)
+                    disallowed_yard_days[cy_id].add(day)
             # Require coverage on every required day (exactly once per required day)
             for day in cy.required_days:
                 model.Add(covered[(cy_id, day)] == 1)
@@ -711,7 +751,14 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
     # Employees may have yard exclusions and availability constraints
     # Optimized: Pre-compute invalid assignments to reduce constraint creation overhead
-    invalid_assignments = set()
+    invalid_assignments: Set[Tuple[int, int, DayOfWeek]] = set()
+
+    # Yard-day restrictions: if a yard is disallowed on a day, no employee can be assigned.
+    for cy_id, disallowed_days in disallowed_yard_days.items():
+        for day in disallowed_days:
+            for emp_id in emp_id_list:
+                invalid_assignments.add((emp_id, cy_id, day))
+
     for emp_id, emp in employees.items():
         excluded_yards_set = set(emp.excluded_yards)
         available_days_set = set(emp.available_days)
@@ -726,9 +773,16 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                     if day not in available_days_set:
                         invalid_assignments.add((emp_id, cy_id, day))
 
-    # Apply constraints for invalid assignments
-    for emp_id, cy_id, day in invalid_assignments:
-        model.Add(x[(emp_id, cy_id, day)] == 0)
+    # Decision variables: x[(emp_id, cy_id, day)] = 1 if employee works at yard on day
+    # PERFORMANCE: Only create variables for valid (not invalid) assignments.
+    x: Dict[Tuple[int, int, DayOfWeek], cp_model.IntVar] = {}
+    for emp_id in emp_id_list:
+        for cy_id in cy_id_list:
+            for day in days:
+                key = (emp_id, cy_id, day)
+                if key in invalid_assignments:
+                    continue
+                x[key] = model.NewBoolVar(f'x_e{emp_id}_cy{cy_id}_{day}')
 
     # Constraint 1 (UPDATED): If a yard is covered, it must have between min and max employees
     # If not covered, it has 0 employees
@@ -736,8 +790,9 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
     for cy_id, cy in car_yards.items():
         for day in days:
-            employees_at_yard = sum(x[(emp_id, cy_id, day)]
-                                    for emp_id in emp_id_list)
+            employees_at_yard = sum(
+                x.get((emp_id, cy_id, day), 0) for emp_id in emp_id_list
+            )
 
             # If covered = 1, then employees_at_yard >= min_employees
             # If covered = 0, then employees_at_yard >= 0 (always true)
@@ -763,7 +818,10 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
             extra_employee_penalties.append(penalty_amount)
 
-    # Constraint: Yards scheduled on the same day incur a penalty if they exceed max_radius
+    # Radius rule (north/south position)
+    # - SOFT: penalize scheduling far-apart yards on the same day
+    # - HARD: forbid scheduling far-apart yards on the same day
+    # - OFF: ignore radius entirely
     yard_pairs_exceeding_radius = []
     radius_penalties = []
     sorted_yard_ids = sorted(car_yards.keys())
@@ -778,15 +836,26 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
             if position_diff > request.max_radius:
                 yard_pairs_exceeding_radius.append((cy_a_id, cy_b_id))
 
-    for day in days:
-        for cy_a_id, cy_b_id in yard_pairs_exceeding_radius:
-            both_covered = model.NewBoolVar(
-                f'radius_violation_cy{cy_a_id}_{cy_b_id}_{day}')
-            model.Add(both_covered <= covered[(cy_a_id, day)])
-            model.Add(both_covered <= covered[(cy_b_id, day)])
-            model.Add(both_covered >= covered[(cy_a_id, day)] +
-                      covered[(cy_b_id, day)] - 1)
-            radius_penalties.append(both_covered)
+    if request.radius_mode == RadiusMode.SOFT:
+        for day in days:
+            for cy_a_id, cy_b_id in yard_pairs_exceeding_radius:
+                both_covered = model.NewBoolVar(
+                    f'radius_violation_cy{cy_a_id}_{cy_b_id}_{day}')
+                model.Add(both_covered <= covered[(cy_a_id, day)])
+                model.Add(both_covered <= covered[(cy_b_id, day)])
+                model.Add(both_covered >= covered[(cy_a_id, day)] +
+                          covered[(cy_b_id, day)] - 1)
+                radius_penalties.append(both_covered)
+    elif request.radius_mode == RadiusMode.HARD:
+        # Forbid covering far-apart yards on the same day.
+        # This is often faster than SOFT because it reduces the search space.
+        for day in days:
+            for cy_a_id, cy_b_id in yard_pairs_exceeding_radius:
+                model.Add(covered[(cy_a_id, day)] +
+                          covered[(cy_b_id, day)] <= 1)
+    else:
+        # OFF: radius_penalties stays empty and no constraints are added.
+        pass
 
     # Constraint 2: Limit total hours per employee per day
     # Distribute total yard hours across assigned employees while respecting per-employee limits
@@ -802,14 +871,19 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         for day in days:
             work_vars = []
             for emp_id in emp_id_list:
+                x_key = (emp_id, cy_id, day)
+                x_var = x.get(x_key)
+                if x_var is None:
+                    # Impossible assignment => no work minutes variable needed.
+                    work_minutes[(emp_id, cy_id, day)] = 0
+                    continue
+
                 work_var = model.NewIntVar(
                     0, total_minutes,
                     f'work_e{emp_id}_cy{cy_id}_d{day}')
                 work_minutes[(emp_id, cy_id, day)] = work_var
-                model.Add(work_var == 0).OnlyEnforceIf(
-                    x[(emp_id, cy_id, day)].Not())
-                model.Add(work_var <= total_minutes).OnlyEnforceIf(
-                    x[(emp_id, cy_id, day)])
+                model.Add(work_var == 0).OnlyEnforceIf(x_var.Not())
+                model.Add(work_var <= total_minutes).OnlyEnforceIf(x_var)
                 work_vars.append(work_var)
 
             total_work = sum(work_vars)
@@ -852,16 +926,17 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                 # For each employee: if assigned, their work must be between min_work and max_work
                 for emp_id in emp_id_list:
                     work_var = work_minutes[(emp_id, cy_id, day)]
+                    x_var = x.get((emp_id, cy_id, day))
+                    if x_var is None:
+                        continue
 
                     # If assigned, work >= min_work
                     # When work_var == 0 (not assigned), this constraint doesn't apply
-                    model.Add(work_var >= min_work).OnlyEnforceIf(
-                        x[(emp_id, cy_id, day)])
+                    model.Add(work_var >= min_work).OnlyEnforceIf(x_var)
 
                     # If assigned, work <= max_work
                     # When work_var == 0 (not assigned), this constraint doesn't apply
-                    model.Add(work_var <= max_work).OnlyEnforceIf(
-                        x[(emp_id, cy_id, day)])
+                    model.Add(work_var <= max_work).OnlyEnforceIf(x_var)
 
                     # Note: When employee is not assigned, work_var == 0 (already constrained above),
                     # so min_work and max_work constraints don't interfere
@@ -875,7 +950,8 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
                 f'total_minutes_e{emp_id}_d{day}')
             employee_day_minutes[(emp_id, day)] = total_minutes_worked
             model.Add(total_minutes_worked == sum(
-                work_minutes[(emp_id, cy_id, day)] for cy_id in cy_id_list))
+                work_minutes.get((emp_id, cy_id, day), 0) for cy_id in cy_id_list
+            ))
             max_minutes = int(request.max_hours_per_day * SCALE_FACTOR)
             max_minutes_with_buffer = max_minutes + HOURS_OVERAGE_BUFFER_MINUTES
 
@@ -989,14 +1065,15 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
         for cy_id in cy_id_list:
             for day in days:
                 # Quality score (employee reliability)
-                quality_score.append(x[(emp_id, cy_id, day)] * emp_ranking)
+                quality_score.append(
+                    x.get((emp_id, cy_id, day), 0) * emp_ranking)
 
     # Objective 3: Balance workload - minimize difference between max and min shifts
     shifts_per_employee_vars = []
     for emp_id in emp_id_list:
-        total = sum(x[(emp_id, cy_id, day)]
-                    for cy_id in cy_id_list
-                    for day in days)
+        total = sum(
+            x.get((emp_id, cy_id, day), 0) for cy_id in cy_id_list for day in days
+        )
         shifts_per_employee_vars.append(total)
 
     min_shifts = model.NewIntVar(0, num_days * num_car_yards, 'min_shifts')
@@ -1010,24 +1087,31 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
     # Combined objective: prioritize high-priority yards, maximize quality, minimize workload imbalance
     total_assignments = sum(
-        x[(emp_id, cy_id, day)]
-        for emp_id in emp_id_list
-        for cy_id in cy_id_list
-        for day in days
+        x_var for x_var in x.values()
     )
 
     partial_overlap_penalties = []
 
+    # IMPORTANT PERFORMANCE OPTIMIZATION:
+    # The partial overlap penalty is extremely expensive if computed for *all* yard pairs
+    # (O(days * yards^2 * employees)). We only compute it for yard pairs that are
+    # geographically plausible to be scheduled on the same day (within max_radius).
     sorted_cy_ids = sorted(car_yards.keys())
+    overlap_pairs: List[Tuple[int, int]] = []
+    for idx_a in range(len(sorted_cy_ids)):
+        cy_a_id = sorted_cy_ids[idx_a]
+        for idx_b in range(idx_a + 1, len(sorted_cy_ids)):
+            cy_b_id = sorted_cy_ids[idx_b]
+            if abs(car_yards[cy_a_id].north_south_position -
+                   car_yards[cy_b_id].north_south_position) <= request.max_radius:
+                overlap_pairs.append((cy_a_id, cy_b_id))
+
     for day in days:
-        for idx_a in range(len(sorted_cy_ids)):
-            cy_a = sorted_cy_ids[idx_a]
-            for idx_b in range(idx_a + 1, len(sorted_cy_ids)):
-                cy_b = sorted_cy_ids[idx_b]
-                mix_var = _create_partial_overlap_penalty(
-                    model, employees, cy_a, cy_b, day, x
-                )
-                partial_overlap_penalties.append(mix_var)
+        for cy_a, cy_b in overlap_pairs:
+            mix_var = _create_partial_overlap_penalty(
+                model, employees, cy_a, cy_b, day, x, invalid_assignments
+            )
+            partial_overlap_penalties.append(mix_var)
 
     objective_components = [
         # Highest priority: cover high-priority yards
@@ -1059,6 +1143,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     # Solve
     logger.info("Starting CP-SAT solver")
     logger.debug(f"Solver timeout: {DEFAULT_SOLVER_TIMEOUT_SECONDS} seconds")
+    logger.debug(f"Solver workers: {DEFAULT_SOLVER_NUM_WORKERS}")
 
     # Log model statistics before solving
     logger.debug(
@@ -1112,6 +1197,7 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = DEFAULT_SOLVER_TIMEOUT_SECONDS
+    solver.parameters.num_search_workers = max(1, DEFAULT_SOLVER_NUM_WORKERS)
     status = solver.Solve(model)
 
     # Log solver status
@@ -1161,19 +1247,17 @@ def solve_roster(request: ScheduleRequest) -> ScheduleResponse:
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         # Optimized: Build assignments list directly from solver results
         # Only check assignments that are actually set to 1
-        for emp_id in emp_id_list:
-            emp = employees[emp_id]
-            for cy_id in cy_id_list:
+        for (emp_id, cy_id, day), x_var in x.items():
+            if solver.Value(x_var) == 1:
+                emp = employees[emp_id]
                 cy = car_yards[cy_id]
-                for day in days:
-                    if solver.Value(x[(emp_id, cy_id, day)]) == 1:
-                        raw_assignments.append({
-                            "employee_id": emp_id,
-                            "employee_name": emp.name,
-                            "car_yard_id": cy_id,
-                            "car_yard_name": cy.name,
-                            "day": day
-                        })
+                raw_assignments.append({
+                    "employee_id": emp_id,
+                    "employee_name": emp.name,
+                    "car_yard_id": cy_id,
+                    "car_yard_name": cy.name,
+                    "day": day
+                })
 
         if not raw_assignments:
             raise HTTPException(

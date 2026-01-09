@@ -2037,6 +2037,170 @@ def test_max_radius_soft_penalty():
                     f"   {day}: yards {yard_ids}, max position diff: {max_diff}")
 
 
+def test_radius_mode_hard_blocks_far_apart_required_yards():
+    """
+    radius_mode='hard': far-apart yards cannot be covered on the same day.
+
+    We force both yards to be covered on Monday using required_days; with HARD radius
+    this becomes infeasible and should return 400 instead of a roster.
+    """
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY],
+        )
+    ]
+
+    # Two yards far apart (diff=100) and both required on Monday.
+    car_yards = [
+        CarYard(
+            id=1,
+            name="North Yard",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            north_south_position=0,
+            required_days=[DayOfWeek.MONDAY],
+        ),
+        CarYard(
+            id=2,
+            name="South Yard",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            north_south_position=100,
+            required_days=[DayOfWeek.MONDAY],
+        ),
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        max_hours_per_day=8.0,
+        max_radius=30,
+        radius_mode="hard",
+    )
+
+    response = client.post("/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 400
+
+
+def test_radius_mode_off_ignores_radius_and_allows_far_apart_required_yards():
+    """
+    radius_mode='off': radius is ignored entirely.
+
+    With both yards required on Monday (and 1 employee who can work both),
+    we should get a valid roster that includes assignments to both yards.
+    """
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY],
+        )
+    ]
+
+    car_yards = [
+        CarYard(
+            id=1,
+            name="North Yard",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            north_south_position=0,
+            required_days=[DayOfWeek.MONDAY],
+        ),
+        CarYard(
+            id=2,
+            name="South Yard",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            north_south_position=100,
+            required_days=[DayOfWeek.MONDAY],
+        ),
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        max_hours_per_day=8.0,
+        max_radius=30,
+        radius_mode="off",
+    )
+
+    response = client.post("/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    assignments = response.json()["assignments"]
+
+    monday_yards = {
+        a["car_yard_id"] for a in assignments if a["day"] == DayOfWeek.MONDAY.value
+    }
+    assert monday_yards == {1, 2}
+
+
+def test_radius_mode_hard_allows_nearby_required_yards():
+    """radius_mode='hard' should still allow yards within max_radius to be covered together."""
+    employees = [
+        Employee(
+            id=1,
+            name="Employee 1",
+            ranking=EmployeeReliabilityRating.EXCELLENT,
+            available_days=[DayOfWeek.MONDAY],
+        )
+    ]
+
+    # Two yards close together (diff=10) and both required on Monday.
+    car_yards = [
+        CarYard(
+            id=1,
+            name="Yard 1",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            north_south_position=0,
+            required_days=[DayOfWeek.MONDAY],
+        ),
+        CarYard(
+            id=2,
+            name="Yard 2",
+            priority=CarYardPriority.HIGH,
+            min_employees=1,
+            max_employees=1,
+            hours_required=1.0,
+            north_south_position=10,
+            required_days=[DayOfWeek.MONDAY],
+        ),
+    ]
+
+    request = ScheduleRequest(
+        employees=employees,
+        car_yards=car_yards,
+        days=[DayOfWeek.MONDAY],
+        max_hours_per_day=8.0,
+        max_radius=30,
+        radius_mode="hard",
+    )
+
+    response = client.post("/api/v1/roster", json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    assignments = response.json()["assignments"]
+    monday_yards = {
+        a["car_yard_id"] for a in assignments if a["day"] == DayOfWeek.MONDAY.value
+    }
+    assert monday_yards == {1, 2}
+
+
 def test_max_radius_allows_nearby_yards():
     """Test that yards within max_radius can be scheduled together on the same day"""
     employees = [
